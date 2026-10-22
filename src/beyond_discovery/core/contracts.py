@@ -173,6 +173,7 @@ class MetaPolicy:
     required_stagnation: int = 2
     search_order: str = "forward"
     revision: int = 0
+    program: Any = None
 
 
 @dataclass(frozen=True)

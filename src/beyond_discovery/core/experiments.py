@@ -6,6 +6,7 @@ from ..runtime.expression import evaluate
 
 
 def context_for(action, history, initial):
+    if hasattr(action,"action"): action=action.action
     return {"input": action.arguments.value, "previous": plain(history[-1].outcome) if history else initial,
             "time": len(history)}
 

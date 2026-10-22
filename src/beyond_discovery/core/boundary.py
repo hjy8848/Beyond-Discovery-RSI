@@ -22,6 +22,7 @@ class HypothesisFamily:
     version: str
     members: tuple
     scope: str
+    complete: bool = True
 
     def __post_init__(self):
         if not self.name or not self.version or not self.scope or not self.members:
@@ -75,7 +76,7 @@ def certify_boundary(adapter, evidence, family, predictor, budget):
     if consistent:
         selected = digest(evidence.old_claim.program)
         kind = BoundaryKind.CONSISTENT if consistent == selected else BoundaryKind.SEARCH_FAILURE
-    elif examined == len(family.members) and evidence.observations:
+    elif examined == len(family.members) and evidence.observations and family.complete:
         kind = BoundaryKind.SPACE_REFUTED
     else:
         kind = BoundaryKind.UNDETERMINED

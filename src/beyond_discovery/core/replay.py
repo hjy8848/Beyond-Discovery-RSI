@@ -11,8 +11,10 @@ from ..runtime.policy_runtime import freeze
 
 
 def snapshot_from(data):
+    meta_data = {**data["meta"], "operators": tuple(data["meta"]["operators"])}
+    if isinstance(meta_data.get("program"), dict): meta_data["program"] = artifact_from(meta_data["program"])
     return Snapshot(data["role"], ModelState(**data["model"]),
-                    MetaPolicy(**{**data["meta"], "operators": tuple(data["meta"]["operators"])}),
+                    MetaPolicy(**meta_data),
                     tuple(data["representation"]), ExperimentProgram(**data["experiment"]),
                     data["generation"], data["parent_hash"], tuple(data["knowledge"]),
                     tuple(artifact_from(a) for a in data.get("artifacts", ())))

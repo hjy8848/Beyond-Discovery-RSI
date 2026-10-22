@@ -14,6 +14,7 @@ from ..core.protocol import Action, DomainCapabilities, JSONValue, ProtocolError
 from ..core.synthesis import Grammar, enumerate_programs
 from ..core.worlds import WorldCertifier, behavior, expression_from, reference_expression
 from ..core.experiments import rollout
+from ..core.experiments import context_for
 from ..runtime.expression import evaluate, node_size, typecheck
 
 
@@ -167,6 +168,11 @@ class TransitionAdapter:
                 previous=self._oracle(self._worlds[e.task.task_id],{"input":o.action.arguments.value,"previous":previous,"time":index})
                 if previous!=plain(o.outcome): return False
             node=expression_from(e.new_claim.program)
+            for b in e.boundaries:
+                if b.witness not in e.observations or not b.reproduced: return False
+                index=e.observations.index(b.witness)
+                predicted=evaluate(expression_from(e.old_claim.program),context_for(b.witness,e.observations[:index],self.initial))
+                if predicted!=b.old_prediction or predicted==plain(b.witness.outcome): return False
             if self.fingerprint(node)!=e.behavior_hash: return False
             return self.evaluate(e.new_claim,e.task,e.task.split)==e.score
         except (ProtocolError,TypeError,ValueError,KeyError): return False

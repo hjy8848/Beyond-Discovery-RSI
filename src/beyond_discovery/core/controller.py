@@ -129,7 +129,7 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
                     if certificate.task is None or certificate.task.split != "train" or certificate.task.domain_id != adapter.domain_id:
                         raise ProtocolError("certified generated worlds must remain in the train partition")
                     training += evaluate((certificate.task,), s_parent, c_parent, generation, "generated-train")
-            elif config.required_world_tracks:
+            elif config.required_world_tracks and not getattr(runtime,"supports_world_creation",False):
                 raise CapabilityUnsupported("runtime did not implement required world creation")
             else:
                 archive.append("scope_limitation", {"feature": "world-creation", "status": "CAPABILITY_UNSUPPORTED"})
@@ -160,6 +160,7 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
             decisions = []
             for role, parent, attempts in (("challenger", c_parent, c_attempts), ("scientist", s_parent, s_attempts)):
                 for index, (child, patch) in enumerate(attempts):
+                    proposed_meta=child.meta
                     method_signature = None
                     s_eval = child if role == "scientist" else s_parent
                     c_eval = child if role == "challenger" else c_parent
@@ -179,7 +180,7 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
                     # Meta attribution: only replace M, hold task program/weights
                     # and adaptation budget fixed. Compare inventions it produces.
                     meta_gate = None
-                    if child.meta != parent.meta and gate.decision == Decision.ACCEPT:
+                    if child.meta != parent.meta and (gate.decision == Decision.ACCEPT or getattr(runtime,"separate_meta",False)):
                         old_adapt, _ = runtime.adapt(parent, diagnosis, public_context, parent.meta)
                         new_adapt, _ = runtime.adapt(parent, diagnosis, public_context, child.meta)
                         old_e = evaluate(dev, old_adapt if role == "scientist" else s_parent,
@@ -207,13 +208,18 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
                     effective_new = novelty and gate.decision == Decision.ACCEPT and method_signature not in method_signatures
                     if effective_new:
                         method_signatures.add(method_signature)
+                    from .meta import source_diff
                     archive.append("gate", {"generation": generation, "role": role, "index": index,
                                             "candidate": child, "patch": patch, "task_gate": gate,
                                             "meta_gate": meta_gate, "method_behavior_signature": method_signature,
+                                            "proposed_meta":proposed_meta,"meta_rollback":proposed_meta!=child.meta,
+                                            "meta_source_diff":source_diff(parent.meta.program,proposed_meta.program),
                                             "effective_new_method": effective_new})
                     decisions.append((role, plain(gate), plain(meta_gate)))
                     if gate.decision == Decision.ACCEPT and selected[role] == parent:
                         selected[role] = child
+                    elif meta_gate is not None and meta_gate.decision == Decision.ACCEPT and selected[role] == parent:
+                        selected[role] = replace(parent,meta=child.meta,generation=parent.generation+1,parent_hash=parent.content_hash)
             c_next, s_next = selected["challenger"], selected["scientist"]
             # Periodic four-way cross-pairing, fixed common audit pool, no updates.
             c_only = evaluate(dev, s_parent, c_next, generation, "joint-c-only")
