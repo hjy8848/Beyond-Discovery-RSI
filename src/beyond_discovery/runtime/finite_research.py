@@ -5,6 +5,7 @@ interaction protocol. This is retained legacy behavior, not M3/M4 invention.
 """
 from dataclasses import replace
 from ..agents.scientist import Scientist
+from ..agents.scientist import program_library
 from ..agents.challenger import Challenger
 from .policy_runtime import predict
 from ..core.contracts import (Boundary, EvidenceBundle, Provenance, Usage, digest,
@@ -50,7 +51,13 @@ def finite_episode(adapter, task, scientist_snapshot, challenger_snapshot, gener
                   search=len(scientist.programs)))
         if not adapter.audit(evidence):
             raise RuntimeError("independent evidence audit failed")
-        return replace(evidence, usage=replace(evidence.usage, verification_outputs=adapter.meter().verification_outputs - before_verification))
+        from ..core.boundary import HypothesisFamily, certify_boundary
+        family = HypothesisFamily("finite-depth-one", "1", program_library(caps["width"], scientist_snapshot.representation, 100000),
+                                  "declared depth-one expression grammar; not all programs or all LLM representations")
+        certificate = certify_boundary(adapter, evidence, family, lambda p, a, h: predict(p, a), search_budget)
+        return replace(evidence, boundary_certificates=(certificate,),
+                       usage=replace(evidence.usage, predictions=evidence.usage.predictions + certificate.evaluations,
+                                     verification_outputs=adapter.meter().verification_outputs - before_verification))
     finally:
         adapter.close(session)
 

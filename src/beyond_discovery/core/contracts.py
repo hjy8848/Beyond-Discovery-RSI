@@ -148,6 +148,7 @@ class EvidenceBundle:
     usage: Usage
     failure: Optional[str] = None
     allocation: Optional[Usage] = None
+    boundary_certificates: tuple = ()
 
     def agent_view(self) -> dict:
         if self.task.split != "train":
