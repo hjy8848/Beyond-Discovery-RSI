@@ -23,6 +23,7 @@ def _worker(connection,directory,memory,cpu):
     try:
         import resource
         from .expression import evaluate,freeze
+        from .control import validate as validate_control, execute as execute_control
         resource.setrlimit(resource.RLIMIT_CPU,(cpu,cpu))
         try:
             resource.setrlimit(resource.RLIMIT_AS,(memory,memory))
@@ -42,7 +43,18 @@ def _worker(connection,directory,memory,cpu):
             if payload==b'close': break
             try:
                 data=json.loads(payload)
-                result=evaluate(freeze(data['node']),data['context'],data['fuel'])
+                if 'control' in data:
+                    program=validate_control(data['control'])
+                    def effect(name,args):
+                        packet=json.dumps({'effect':{'name':name,'arguments':args}},allow_nan=False).encode()
+                        if len(packet)>262144: raise ProtocolError('control effect request size')
+                        connection.send_bytes(packet)
+                        reply=json.loads(connection.recv_bytes(262144))
+                        if 'effect_error' in reply: raise ProtocolError('control capability rejected')
+                        return reply['value']
+                    result=execute_control(program,data['context'],effect,data['fuel'])
+                else:
+                    result=evaluate(freeze(data['node']),data['context'],data['fuel'])
                 response={'value':result}
             except (ValueError,TypeError,KeyError,IndexError,MemoryError,PermissionError,ProtocolError) as exc:
                 response={'error':type(exc).__name__}
@@ -101,16 +113,43 @@ class ResearchSandbox:
         raise CapabilityUnsupported('resident memory monitor unsupported')
 
     def evaluate(self,node,context,fuel):
+        return self.request({'node':node,'context':context,'fuel':fuel})
+
+    def control(self,program,context,effect,fuel=4096):
+        return self.request({'control':program,'context':context,'fuel':fuel},effect)
+
+    def request(self,data,effect=None):
         if not self.process.is_alive() or time.monotonic()-self.started>self.wall:
             raise ProtocolError('SANDBOX_RESOURCE_LIMIT')
-        payload=json.dumps({'node':node,'context':context,'fuel':fuel},allow_nan=False).encode()
+        payload=json.dumps(data,allow_nan=False).encode()
         if len(payload)>262144: raise ProtocolError('SANDBOX_INPUT_SIZE')
+        capability_error=None
         try:
             self.connection.send_bytes(payload)
-            if not self.connection.poll(self.timeout):
-                self.process.terminate(); raise ProtocolError('SANDBOX_TIMEOUT')
-            response=json.loads(self.connection.recv_bytes(262144))
-        except (EOFError,OSError): raise ProtocolError('SANDBOX_WORKER_FAILED')
+            effects=0
+            while True:
+                if not self.connection.poll(self.timeout):
+                    self.process.terminate(); raise ProtocolError('SANDBOX_TIMEOUT')
+                response=json.loads(self.connection.recv_bytes(262144))
+                if 'effect' not in response: break
+                effects+=1
+                if effect is None or effects>64:
+                    self.process.terminate(); raise ProtocolError('SANDBOX_CAPABILITY_BUDGET')
+                try:
+                    request=response['effect']
+                    answer=effect(request['name'],request['arguments'])
+                    encoded=json.dumps({'value':answer},allow_nan=False).encode()
+                    if len(encoded)>262144: raise ProtocolError('SANDBOX_EFFECT_RESULT_SIZE')
+                except Exception as exc:
+                    capability_error=exc
+                    self.connection.send_bytes(b'{"effect_error":true}')
+                    if self.connection.poll(self.timeout): self.connection.recv_bytes(262144)
+                    else: self.process.terminate()
+                    raise
+                self.connection.send_bytes(encoded)
+        except (EOFError,OSError):
+            if capability_error is not None: raise capability_error
+            raise ProtocolError('SANDBOX_WORKER_FAILED')
         if 'error' in response: raise ProtocolError('SANDBOX_CODE_INVALID:'+response['error'])
         if 'value' not in response: raise ProtocolError('SANDBOX_PROTOCOL_INVALID')
         return response['value']

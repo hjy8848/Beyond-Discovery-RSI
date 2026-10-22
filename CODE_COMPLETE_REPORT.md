@@ -1,5 +1,10 @@
 # CODE_COMPLETE_REPORT — Beyond-Discovery RSI
 
+> **范围更正：** 原始 M1–M7 报告和 79 项测试对应提交 `3ccda3f`。这份报告不能作为开放式研究
+> 工作流重构或任意复杂算法自主发明已完成的证明；此前无条件的 CODE-COMPLETE 表述过宽。
+> 后续已加入函数、分支、反馈驱动的研究控制元程序，但仍是有界机制扩展，详见
+> [范围更正与扩展报告](reports/RESEARCH_CONTROL_EXTENSION.md)。旧证据按原版本保留。
+
 日期：2026-10-23。开发基础：M1 `7acaae1`，PR #1 尚未合并。
 本报告说明 **声明能力范围内的 M1–M7 工程实现与实际验证**，不宣称任意领域/任意代码的
 通用发现算法已经得到验证。真实模型、神经训练和外部 benchmark 的未验证项单独列出。
@@ -21,7 +26,7 @@ SHA-256：
 | M4 | `1df260c` | `worlds.ChallengerInventor/WorldCertifier`：基于冻结假设、边界与 train 证据生成世界，独立语义、去重与认证 | 56 项 |
 | M5 | `21b3a09` | `meta.synthesize_meta`、`SynthesisRuntime.adapt`、Controller：双方可执行元策略、固定机会独立 Gate、diff 和回滚 | 62 项 |
 | M6 | `d5e880c` | `models`、`trainer.LoRABackend`、`ModelResearchRuntime`：真实 HTTP/HF、Token 预留、角色独立训练及 checkpoint、主循环接入 | 68 项；真实神经路径未运行 |
-| M7 | 本报告所在提交 | 统一 CLI、11 种对照/消融、双域闭环、spawn 沙盒、成本补齐、有界可辨识证明、证据包、统一审查 | 最终 79 项，全部通过 |
+| M7 | `3ccda3f` | 统一 CLI、11 种对照/消融、双域闭环、spawn 沙盒、成本补齐、有界可辨识证明、证据包、统一审查 | 最终 79 项，全部通过 |
 
 各阶段详情和局限见 `reports/M1.md`–`reports/M7.md`。M7 对 M6 做了角色奖励、精确采样 Token、
 固定权重对照模板、实际元代码排序和失败日志的补强；对 M4 补充了独立可辨识证明及预算协商。
@@ -146,7 +151,7 @@ PYTHONPATH=src python3 -m beyond_discovery.run suite --domain string-transducer 
 ```
 
 `evidence/local-evidence-20261023.tar.gz` 保存演示和两域对照的完整 hash-chain 日志/对象、
-最终测试输出、构建/安装日志。解压后可在本提交源码上 Replay `demo/stateful-scm` 或 `demo/string-transducer`。
+最终测试输出、构建/安装日志。解压后可在原始 `3ccda3f` 提交源码上 Replay `demo/stateful-scm` 或 `demo/string-transducer`。
 Replay 核对实现哈希，实际重执行确定性认证/交互；不请求模型、不重新训练，不把 API 留档当逐 Token 再现。
 原始审计记录含 dev/test，只供审核，不进入 Agent 提示、经验或训练。
 

@@ -36,6 +36,8 @@ class SynthesisRuntime:
 
     def charge_search(self,amount):
         if hasattr(self,"reserve_search"): self.reserve_search(amount)
+        if getattr(self,'adaptation_limit',None) is not None and self.total_search-self.adaptation_start+amount>self.adaptation_limit:
+            raise ProtocolError('matched meta adaptation search budget exhausted')
         self.total_search+=amount
 
     def context(self,adapter):
@@ -171,6 +173,13 @@ class SynthesisRuntime:
         if any(e.task.split!="train" for e in training): raise PermissionError("candidate generation is train-only")
         if mode=="fixed" or (parent.role=="challenger" and mode in ("fixed_challenger","random_challenger","hardness_first")): return ()
         self.public=public_context
+        from ..core.control import is_control
+        if is_control(meta.program):
+            from .control_research import run_control
+            try: return run_control(self,parent,training,public_context,meta,limit,mode)[0]
+            except ProtocolError as exc:
+                self.events.append({'type':'control-execution-invalid','workflow':meta.program.content_hash,'reason':str(exc)})
+                return ()
         grammar=self.grammar(parent)
         self.charge_search(self.search_budget)
         enumeration=enumerate_programs(grammar,self.search_budget)
@@ -244,6 +253,30 @@ class SynthesisRuntime:
                           "cost":e.usage.search,"novelty":0,"coverage":1})
         self.charge_search(min(128,self.search_budget))
         programs=synthesize_meta(parent.meta.program,tuple(facts),self.provenance(parent),min(128,self.search_budget))
+        from ..core.control import seed_control,mutate_control,is_control
+        from .control_research import run_control
+        seed=parent.meta.program if is_control(parent.meta.program) else seed_control(parent.meta.program,self.provenance(parent))
+        if mode in ('program_evolution','no_diagnosis'):
+            from ..core.control import control_artifact
+            from .control import load
+            data=load(seed)
+            if 'diagnose' in data['functions']:
+                data['functions']['diagnose']['body']=['const',True]
+                seed=control_artifact(data,self.provenance(parent))
+        workflows=() if mode=='reflection' else (seed,)+mutate_control(seed,self.provenance(parent),max(3,limit),record_fields={k:v for k,v in {'errors':'integer','refuted':'boolean','index':'integer','observations':'array','cluster':'string'}.items() if k!='refuted' or mode not in ('program_evolution','no_diagnosis')})
+        behavioral=[]
+        seen={digest(tuple(a.source for a in child.artifacts)) for child,_ in attempts}
+        for workflow in workflows:
+            self.charge_search(1)
+            try:
+                products,_=run_control(self,parent,training,public_context,replace(parent.meta,program=workflow),1,mode)
+            except ProtocolError as exc:
+                self.events.append({'type':'control-mutation-invalid','workflow':workflow.content_hash,'reason':str(exc)})
+                continue
+            signature=digest(tuple(a.source for a in products[0][0].artifacts)) if products else None
+            if signature is not None and signature not in seen:
+                seen.add(signature); behavioral.append(workflow)
+        programs=tuple(behavioral)+tuple(programs)
         if not programs: return attempts
         return tuple((replace(child,meta=replace(parent.meta,program=programs[i%len(programs)],revision=parent.meta.revision+1)),patch)
                      for i,(child,patch) in enumerate(attempts))
@@ -251,6 +284,28 @@ class SynthesisRuntime:
     def adapt(self,parent,diagnosis,public_context,meta):
         # Fixed parent task artifacts, same frozen train opportunity set, same
         # adaptation allocation. No private gate feedback is retained here.
-        attempts=self._generate(parent,diagnosis,self.training,public_context,1,"full",meta)
-        if not attempts: return parent,None
-        return attempts[0]
+        # Both legacy and workflow generators have the SAME fixed opportunity
+        # ceilings. Branching or loops cannot purchase extra adaptation search.
+        from .expression import prediction_meter
+        limit=self.search_budget*(2+(len(parent.meta.operators)+1)*len(self.training))
+        self.adaptation_start=self.total_search; self.adaptation_limit=limit
+        self.adaptation_model_calls=0
+        model_tokens_before=getattr(self,"total_model_tokens",0)
+        before=prediction_meter.get(); predictions=[0]
+        prediction_limit=limit*max(1,len(self.training))*max(1,parent.experiment.action_budget)
+        def meter():
+            if predictions[0]>=prediction_limit: raise ProtocolError('matched meta prediction budget exhausted')
+            predictions[0]+=1
+            if before is not None: before()
+        token=prediction_meter.set(meter)
+        try:
+            attempts=self._generate(parent,diagnosis,self.training,public_context,1,"full",meta)
+            return attempts[0] if attempts else (parent,None)
+        finally:
+            prediction_meter.reset(token)
+            self.events.append({'type':'meta-adaptation-allocation','parent':parent.content_hash,
+                                'meta':meta.program.content_hash,'search_limit':limit,'prediction_limit':prediction_limit,
+                                'search_used':self.total_search-self.adaptation_start,'predictions_used':predictions[0],
+                                'model_call_limit':1,'model_calls':self.adaptation_model_calls,
+                                'model_tokens_used':getattr(self,'total_model_tokens',0)-model_tokens_before})
+            self.adaptation_limit=None

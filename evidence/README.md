@@ -1,3 +1,7 @@
+Historical baseline evidence: this directory's original bundle and manifest
+belong to commit `3ccda3f`. Check out that commit before replaying that bundle.
+New control-language evidence is kept separately in `control-extension/`.
+
 # Local engineering evidence
 
 `local-evidence-20261023.tar.gz` contains complete synthetic local demo and control

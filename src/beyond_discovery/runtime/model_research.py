@@ -62,7 +62,7 @@ class ModelResearchRuntime(SynthesisRuntime):
         prompt=canonical({'task':kind,'role':parent.role,'public_context':context,'parent':prompt_parent,
                           'meta_policy':meta or parent.meta,'train_evidence':[e.agent_view() for e in training],
                           'limit':limit,'contract':{'world':'JSON object: expression (typed AST), track (A/B)',
-                          'candidate':'JSON list of objects: grammar (optional complete typed grammar), experiment (optional action list), meta (optional scoring AST). Pure code only; no answers or verifier changes.'}})
+                          'candidate':'JSON list of objects: grammar (optional complete typed grammar), experiment (optional action list), meta (optional scoring AST), workflow (optional research-control-v1 document: score, functions, entry). Control expressions support const,var,let,if,fold,call,op,effect; effects invent,experiment,evaluate,predict,model,emit. Pure code only; no answers or verifier changes.'}})
         start=len(client.calls)
         try:
             result=client(prompt,2048)
@@ -87,6 +87,9 @@ class ModelResearchRuntime(SynthesisRuntime):
     def candidates(self,parent,diagnosis,training,public_context,limit,mode):
         self.training=training
         if mode=='fixed': return ()
+        from ..core.control import is_control
+        if is_control(parent.meta.program):
+            return self._generate(parent,diagnosis,training,public_context,limit,mode,parent.meta)
         if self.evolution=='lora-only':
             if parent.role not in self.templates: self.templates[parent.role]=parent
             template=self.templates[parent.role]
@@ -96,7 +99,7 @@ class ModelResearchRuntime(SynthesisRuntime):
         if not isinstance(data,list) or len(data)>limit: raise ProtocolError('model candidate count')
         results=[]
         for item in data:
-            if not isinstance(item,dict) or not item or not set(item)<={'grammar','experiment','meta'}:
+            if not isinstance(item,dict) or not item or not set(item)<={'grammar','experiment','meta','workflow'}:
                 raise ProtocolError('model candidate schema')
             artifacts=list(generation_parent.artifacts); meta=generation_parent.meta; provenance=self.provenance(parent)
             if 'grammar' in item and mode!='no_restructuring':
@@ -117,6 +120,9 @@ class ModelResearchRuntime(SynthesisRuntime):
                 program=meta_artifact(freeze(item['meta']),provenance)
                 if typecheck(freeze(item["meta"]),dict(META_VARIABLES))!="integer": raise ProtocolError("meta type mismatch")
                 meta=replace(meta,program=program,revision=meta.revision+1)
+            if 'workflow' in item and mode!='no_meta' and self.evolution!='lora-only':
+                from ..core.control import control_artifact
+                meta=replace(meta,program=control_artifact(item['workflow'],provenance),revision=meta.revision+1)
             child=replace(parent,artifacts=tuple(artifacts),meta=meta,parent_hash=parent.content_hash,generation=parent.generation+1)
             results.append((child,{'operator':'MODEL_CODE','request_hash':digest(self.sampled[(generation_parent.content_hash,'candidate')][0])}))
         if parent.meta.program is not None and len(results)>1:
@@ -136,6 +142,10 @@ class ModelResearchRuntime(SynthesisRuntime):
     def trained_candidates(self,parent,attempts,training,evaluate,root):
         if self.training_config is None or not attempts: return attempts
         if not hasattr(self.clients[parent.role],'prepare'): raise CapabilityUnsupported('CAPABILITY_UNSUPPORTED: training requires a checkpoint-capable local client')
+        from ..core.control import is_control
+        if is_control(parent.meta.program) and (parent.content_hash,'candidate') not in self.sampled:
+            self.events.append({'type':'training-skipped','role':parent.role,'reason':'workflow produced no fresh neural rollout'})
+            return attempts
         template=self.templates.get(parent.role,parent)
         generation_parent=replace(template,model=parent.model) if self.evolution=='lora-only' else parent
         prompt,result,hashes=self.sampled[(generation_parent.content_hash,'candidate')]
@@ -162,5 +172,7 @@ class ModelResearchRuntime(SynthesisRuntime):
 
     def adapt(self,parent,diagnosis,public_context,meta):
         # Fixed parent weights/program, fixed train opportunity and output cap.
+        from ..core.control import is_control
+        if is_control(meta.program): return super().adapt(parent,diagnosis,public_context,meta)
         attempts=self.candidates(replace(parent,meta=meta),diagnosis,self.training,public_context,self.adaptation_candidates,'full')
         return attempts[0] if attempts else (parent,None)

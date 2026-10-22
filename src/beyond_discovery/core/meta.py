@@ -21,8 +21,13 @@ def meta_artifact(node, provenance, version="1"):
 def score(meta, facts):
     if set(facts) != {name for name,kind in META_VARIABLES}: raise ProtocolError("meta facts contract mismatch")
     if any(type(v) is not int for v in facts.values()): raise ProtocolError("meta facts must be integers")
-    if meta.kind!="meta" or meta.language!="research-expression-v1": raise ProtocolError("invalid meta program")
-    node=freeze(json.loads(meta.source)["expression"])
+    from .control import is_control
+    if is_control(meta):
+        from ..runtime.control import load
+        node=freeze(load(meta)['score'])
+    else:
+        if meta.kind!="meta" or meta.language!="research-expression-v1": raise ProtocolError("invalid meta program")
+        node=freeze(json.loads(meta.source)["expression"])
     return evaluate(node,facts)
 
 

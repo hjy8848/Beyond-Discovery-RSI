@@ -1,5 +1,9 @@
 # Beyond-Discovery RSI
 
+**范围更正：** 当前包含有界方法创造及研究控制元程序；尚未实现或验证任意复杂算法/研究方法的
+开放式自主发明。原先无条件的 CODE-COMPLETE 表述过宽。具体扩展和未解决项见
+[研究控制扩展报告](reports/RESEARCH_CONTROL_EXTENSION.md)。
+
 按 `design/` 中 Core Design Spec v1.0 与 Decision Lock 实现的可执行研究系统。
 M1–M7 的实现、验证范围与限制见 [CODE_COMPLETE_REPORT.md](CODE_COMPLETE_REPORT.md)。
 24 项锁定原则、独立 Gate 和 Archive 保留。**工程闭环可运行；H1–H4 尚未得到科学验证。**
@@ -46,7 +50,10 @@ PYTHONPATH=src python3 -m beyond_discovery.run run --domain document \
   ResearchArtifact 保存实际代码、来源、父代、内容哈希和版本。类比资产只来自审核通过的 train 轨迹。
 - Challenger 使用当前假设及边界证据合成世界和区分实验。独立解释器认证合法性、区分性、
   非平凡性、去重和有界可辨识性。认证失败或未定不会提供有效挑战奖励。
-- MetaPolicy 是实际参与候选排序/模型选择的可执行程序。固定父任务、固定对手、同一 train
+- MetaPolicy 可包含排序表达式，也可包含 `research-control-v1` 函数、分支、fold 和反馈驱动的
+  能力调用，实际改变诊断子程序与研究步骤。固定评分公式的控制流变化也能独立评价。
+  本地结构变异与模型提交均进入 train 试运行，再进入独立元 Gate。
+- MetaPolicy 原有评分表达式仍参与候选排序/模型选择。固定父任务、固定对手、同一 train
   适应机会和预算，独立评价其产生的新方法；记录源代码差异和回滚。
 - 双边候选在 dev 前持久化。dev 只进入独立评分/选择，不能进入生成、训练或提示。
   停止后先冻结，再打开一次最终测试；不能在同一运行目录重试最终测试。
