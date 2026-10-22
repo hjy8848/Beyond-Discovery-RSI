@@ -1,3 +1,5 @@
 include README.md
 recursive-include design *.md *.json
 recursive-include tests *.py
+recursive-include examples *.json
+recursive-include reports *.md

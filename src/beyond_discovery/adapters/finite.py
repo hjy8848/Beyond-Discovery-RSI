@@ -6,7 +6,8 @@ import itertools
 import random
 
 from ..core.contracts import (Certification, ChallengeProposal, Claim, Observation,
-                              Score, Status, TaskRef, digest)
+                              Score, Status, TaskRef, Usage, digest)
+from ..core.protocol import DomainCapabilities, JSONValue, Schema
 from ..runtime.policy_runtime import PolicyError, compile_program, execute
 
 
@@ -39,6 +40,7 @@ class FiniteAdapter:
         self.verification_outputs = 0
         self._worlds = {}
         self._refs = {}
+        self._sessions = {}
         self._sealed = True
         self.inputs = tuple(itertools.product(self.values, repeat=self.width))
         pairs = tuple(itertools.combinations(range(self.width), 2))
@@ -58,6 +60,35 @@ class FiniteAdapter:
 
     def certification_budget(self):
         return (len(self._worlds) + 1) * len(self.inputs)
+
+    def describe(self):
+        return DomainCapabilities(self.domain_id,
+            Schema.of({"type": "array", "items": {"type": "integer"}, "minItems": self.width, "maxItems": self.width}),
+            Schema.of({"type": "integer"}), Schema.of({"type": "integer"}),
+            ("finite-expression-v1",), ("A", "B"), 16,
+            limitations=("retained finite baseline; track B is bounded expression DSL",))
+
+    def estimate_episode(self, action_budget, search_budget):
+        return Usage(experiments=2 * action_budget, predictions=4 * len(self.inputs),
+                     search=search_budget, verification_outputs=2 * len(self.inputs) + 4 * action_budget)
+
+    def estimate_certification(self):
+        return Usage(verification_outputs=self.certification_budget())
+
+    def meter(self):
+        return Usage(verification_outputs=self.verification_outputs)
+
+    def close(self, session):
+        self._sessions.pop(id(session), None)
+        session.remaining = 0
+
+    def initial_observation(self, session):
+        if self._sessions.get(id(session)) is not session:
+            raise ValueError("foreign or closed session")
+        return JSONValue.of(None)
+
+    def conformance_actions(self):
+        return (self.inputs[0], self.inputs[-1])
 
     def capabilities(self):
         return {"domain_id": self.domain_id, "width": self.width,
@@ -130,9 +161,13 @@ class FiniteAdapter:
         self._check(task)
         if type(budget) is not int or not 1 <= budget <= 16:
             raise ValueError("EXPERIMENT_BUDGET")
-        return Session(task, budget)
+        session = Session(task, budget)
+        self._sessions[id(session)] = session
+        return session
 
     def step(self, session, action):
+        if self._sessions.get(id(session)) is not session:
+            raise ValueError("foreign or closed session")
         self._check(session.task)
         if session.remaining <= 0:
             raise ValueError("EXPERIMENT_BUDGET")

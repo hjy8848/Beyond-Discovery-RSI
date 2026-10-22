@@ -1,0 +1,27 @@
+{
+  "kind": "experiment",
+  "language": "research-workflow-v1",
+  "version": "1",
+  "source": "[{\"call\": {\"operation\": \"append\", \"arguments\": {\"text\": \"ab\"}}}, {\"call\": {\"operation\": \"append\", \"arguments\": {\"text\": {\"$ref\": \"last.text\"}}}}, {\"call\": {\"operation\": \"finish\", \"arguments\": {}}}, {\"return\": {\"$ref\": \"last\"}}]",
+  "input_schema": {
+    "document": {
+      "type": "object"
+    }
+  },
+  "output_schema": {
+    "document": {
+      "type": "object"
+    }
+  },
+  "provenance": {
+    "domain_id": "document-edit",
+    "split": "train",
+    "origin": "authored-protocol-example",
+    "generation": 0,
+    "agent_version": "example-author",
+    "seed": 0,
+    "verifier_version": "document-reference-v1",
+    "parent_hash": null
+  },
+  "entrypoint": "main"
+}

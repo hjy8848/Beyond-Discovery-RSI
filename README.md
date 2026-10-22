@@ -4,6 +4,24 @@
 
 **当前状态：本地 Program-only 研究框架和协议验证环境。没有完成 KernelBench、CausalGame、真实模型训练或 H1–H4 的科学验证。** 两个内置领域都采用有限输入、确定性语义，不能充当规范要求的两个差异显著的正式论文领域。
 
+M1 增量实现引入 **Domain Protocol 1.1**：Controller 不再依赖有限输入全集、输入维度、整数表达式算子或标量观察。支持带 schema 的结构化动作/观察、有状态会话、可执行 `ResearchArtifact`、能力协商、资源声明与一致性检查。原有有限表达式算法作为 `FiniteResearchRuntime` 兼容基线保留；这不代表 M2–M7 已完成。阶段审查记录见 [reports/M1.md](reports/M1.md)。
+
+### M1 协议验证与有状态产物执行
+
+```sh
+PYTHONPATH=src python3 -m beyond_discovery.run conformance --domain causal
+PYTHONPATH=src python3 -m beyond_discovery.run conformance --domain vector
+PYTHONPATH=src python3 -m beyond_discovery.run conformance --domain document --experiment examples/document-experiment.json
+PYTHONPATH=src python3 -m beyond_discovery.run run --domain document --experiment examples/document-experiment.json --scope protocol-only --mode fixed --generations 1 --out runs/document-001
+PYTHONPATH=src python3 -m beyond_discovery.run replay --domain document --out runs/document-001
+```
+
+Document 环境验证多步状态、观察驱动的后续动作、终止与会话隔离。示例产物是**明确人工编写的协议样例**，不报告为模型发明。此环境没有世界创造或通用发明后端；默认 Full 要求会在创建运行目录之前报 `CAPABILITY_UNSUPPORTED`，只有显式指定 `protocol-only` 与 `fixed` 才可运行受限协议验证。
+
+新 Adapter 提供 `describe / sample / begin / initial_observation / step / close / evaluate / audit / meter / estimate_episode / estimate_certification / compile_challenge / unseal_for_final`。能力对象声明动作、观察、结果 schema、可执行产物语言、世界轨道、状态特性、评分语义与限制。采样返回不可变 `TaskRef` 元组；结构化载荷是不可变规范 JSON，读取时返回副本。未知 schema 约束、语言、版本、能力或预算要求均明确拒绝。Agent 生成路径只收到公开描述与 train 证据；Adapter 不实现诊断、表征重构或元策略进化。
+
+`research-workflow-v1` 是实际执行的有界数据流语言：`call` 调用协商原语，`$ref` 引用 `initial/last/history/task` 公开值，`return` 产生带版本和来源的可执行结果产物。它不支持任意 Python、循环、文件、网络或私有 Oracle 引用；更丰富的实验语言和发明算法是后续阶段工作。
+
 ## 运行
 
 Python 3.9+，无需联网、密钥或 GPU。在本目录执行：
@@ -62,7 +80,7 @@ result = run_rsi(CausalDiscoveryAdapter(), "runs/custom-001",
 
 生成世界支持可信组合 Track A 和开放的**有界 DSL** Track B。世界作者只提交程序，不提交可信答案。独立树解释器与栈解释器在完整有限输入域逐点核对。生成世界须有至少三个实质影响输出的变量，预置世界仅有两个；因此来源分区由可信属性保证，不通过查询开发/测试答案排除重复。生成世界之间按行为去重。
 
-当前 Core 运行器处理有限整数输入、标量整数输出和 `probe` 原语；`DomainAdapter` 是扩展接口，尚未提供任意观察类型、任意 Python 实验程序或多步有状态世界的通用运行器。新领域若超出这些能力，需要扩展受限执行语言和交互协议，并重新冻结版本，不能仅替换一个类名后宣称已适配。
+原有有限整数语义只在兼容基线运行时和相应 Adapter 中使用。通用协议支持 JSON 结构与多步状态；新领域需提供可信语义、评分与审核，并与实际可执行的研究运行时协商。任意 Python 实验程序仍不受支持，不会自动绕过执行边界。
 
 表达式 VM 禁止导入、文件、网络、反射、循环及任意函数调用，限制深度、节点、输入宽度和数值。这里的隔离来自语言没有主机能力，**不是任意 Python 代码的容器沙盒**。外部模型客户端和训练后端是可信宿主扩展，须由部署方自行隔离；不允许候选自行替换它们。`KernelBenchAdapter` 当前明确抛出 `CAPABILITY_UNSUPPORTED`。
 
@@ -78,6 +96,6 @@ result = run_rsi(CausalDiscoveryAdapter(), "runs/custom-001",
 
 `--mode fixed`、`program_evolution`、`no_restructuring`、`no_meta` 提供工程对照。`program_evolution` 绕过显式诊断门槛，仍允许同样的重构算子。当前没有完整 Reflection、随机挑战者、难度优先挑战者和等计算预算论文实验套件；固定臂实际消耗较少，不宣称与 Full 已完成预算匹配。ANALOGIZE 需要已验证操作映射资产；默认不会凭空制造类比成功。
 
-产物包括 `preregistration.json`、`journal.jsonl`、`objects/`、`frozen.json`、`final_started.json` 和 `summary.json`。对象与日志使用私有文件权限、独占创建及 fsync；哈希链能发现局部篡改，无法抵御机器所有者整体重写。原始审计目录包含 dev/test 私有记录，不应直接提供给 Agent。摘要只报告聚合结果。
+产物包括 `preregistration.json`、`journal.jsonl`、`objects/`、`frozen.json`、`final_started.json` 和 `summary.json`。M1 增加协议协商结果、能力哈希、运行时 ID 和快照内完整研究产物；Replay 验证这些版本并重新执行相同代码。对象与日志使用私有文件权限、独占创建及 fsync；哈希链能发现局部篡改，无法抵御机器所有者整体重写。原始审计目录包含 dev/test 私有记录，不应直接提供给 Agent。摘要只报告聚合结果。历史运行必须使用其原始实现版本回放；M1 不静默迁移旧证据。非确定性领域的逐次重执行 Replay 在 M1 明确报不支持，尚未提供审计回放替代实现。
 
 资源计数定义：experiments 是 discovery 与反例独立复现实验数；predictions 包括评分、行为指纹及审核重复预测；search 是实际枚举候选数，不是 CPU 指令数；verification_outputs 统计可信解释器的所有顶层输出，包括世界认证、去重与审核。CPU/GPU 时间、训练 FLOPs 尚未测量。小样本 bootstrap 仅用于工程 Gate，不构成正式统计结论。

@@ -6,14 +6,12 @@ from pathlib import Path
 from statistics import mean
 
 from .archive import Archive
-from .contracts import (Decision, ExperimentProgram, MetaPolicy, ModelState, Snapshot,
-                        Status, Usage, digest, plain)
+from .contracts import Decision, Status, Usage, digest, plain
 from .diagnosis import diagnose
-from .evolution import candidates
 from .gate import GateConfig, paired_gate
 from .interaction import evaluate_pair, invention_rows, rows
-from .invention import invent
-from ..agents.challenger import Challenger
+from .protocol import CapabilityUnsupported, ProtocolError, checked_sample, negotiate, usage_within
+from ..runtime.research import resolve_runtime
 
 
 @dataclass(frozen=True)
@@ -32,11 +30,12 @@ class RunConfig:
     base_model: str = "bounded-enumerator-v1"
     max_model_tokens: int = 100000
     gate: GateConfig = GateConfig()
+    required_world_tracks: tuple = ("A", "B")
 
     def validate(self):
         if not 1 <= self.generations <= 100 or not 1 <= self.candidate_limit <= 5:
             raise ValueError("generation/candidate bounds")
-        if not 1 <= self.action_budget <= 16 or not 8 <= self.search_budget <= 512:
+        if type(self.action_budget) is not int or self.action_budget < 1 or type(self.search_budget) is not int or self.search_budget < 1:
             raise ValueError("execution budget bounds")
         if min(self.max_experiments, self.max_predictions, self.max_search, self.max_verification_outputs, self.stagnation_patience, self.max_model_tokens) < 1:
             raise ValueError("invalid stop budget")
@@ -49,10 +48,9 @@ class RunConfig:
 
 
 def initial_pair(config):
-    c_meta = MetaPolicy(operators=("INVENT_EXPERIMENT", "RECOMBINE", "REFRAME", "RELAX_ASSUMPTION", "ANALOGIZE"))
-    return tuple(Snapshot(role, ModelState(base_model=config.base_model, role=role), c_meta if role == "challenger" else MetaPolicy(), ("add",),
-                          ExperimentProgram(action_budget=config.action_budget))
-                 for role in ("challenger", "scientist"))
+    """Compatibility entry point for existing finite-baseline callers."""
+    from ..runtime.finite_research import FiniteResearchRuntime
+    return FiniteResearchRuntime().initial_pair(config)
 
 
 def implementation_hash():
@@ -60,23 +58,28 @@ def implementation_hash():
     return digest({str(p.relative_to(root)): p.read_text() for p in sorted(root.rglob("*.py"))})
 
 
-def run_rsi(adapter, out, config=None, proposer=None):
+def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
     config = config or RunConfig()
     config.validate()
-    caps = adapter.capabilities()
-    if not {"A", "B-bounded-DSL"} <= set(caps.get("world_creation", ())):
-        raise ValueError("CAPABILITY_UNSUPPORTED: both certification tracks required")
-    challenger, scientist = initial_pair(config)
-    archive = Archive(out)
+    caps = adapter.describe()
+    runtime = runtime or resolve_runtime(adapter)
+    negotiated = negotiate(caps, runtime.languages, config.action_budget, config.required_world_tracks)
+    runtime.validate_mode(config.mode)
+    challenger, scientist = runtime.initial_pair(config)
+    public_context = runtime.context(adapter)
     # Freeze configuration, exact task membership and implementation before runs.
-    train = adapter.sample("train", config.seed)
-    dev = adapter.sample("dev", config.seed + 1)
-    prereg = {"config": config, "capabilities": caps, "implementation_hash": implementation_hash(),
+    train = checked_sample(adapter, "train", config.seed)
+    dev = checked_sample(adapter, "dev", config.seed + 1)
+    if {t.task_id for t in train} & {t.task_id for t in dev}:
+        raise ProtocolError("train/dev task partitions overlap")
+    archive = Archive(out)
+    prereg = {"config": config, "capabilities": caps, "negotiated_protocol": negotiated,
+              "runtime_id": runtime.runtime_id, "implementation_hash": implementation_hash(),
               "train": train, "dev": dev, "initial_challenger": challenger,
               "initial_scientist": scientist, "joint_fallback": "rollback-both",
               "selection_order": "first-ACCEPT-in-predeclared-candidate-order",
               "meta_protocol": "one operator dispatch, fixed parent representation and fixed dev opportunities",
-              "evidence_status": "synthetic program-only engineering run"}
+              "evidence_status": "engineering protocol execution; no scientific result implied"}
     archive.marker("preregistration.json", prereg)
     archive.append("preregistration", prereg)
     usage = Usage()
@@ -86,22 +89,20 @@ def run_rsi(adapter, out, config=None, proposer=None):
 
     def evaluate(tasks, s, c, generation, label):
         nonlocal usage
+        if digest(adapter.describe()) != negotiated.capabilities_hash:
+            raise ProtocolError("domain capabilities changed after preregistration")
         # Reserve worst-case work BEFORE touching tasks, including reproduction.
         budget = min(s.experiment.action_budget, c.experiment.action_budget)
-        reserve = Usage(experiments=2 * budget * len(tasks),
-                        predictions=4 * len(caps["input_space"]) * len(tasks),
-                        search=config.search_budget * len(tasks),
-                        verification_outputs=(2 * len(caps["input_space"]) + 4 * budget) * len(tasks))
-        bound = usage + reserve
-        if (bound.experiments > config.max_experiments or bound.predictions > config.max_predictions
-                or bound.search > config.max_search or bound.verification_outputs > config.max_verification_outputs):
+        one = adapter.estimate_episode(budget, config.search_budget)
+        reserve = Usage(*(getattr(one, name) * len(tasks) for name in one.__dataclass_fields__))
+        limit = Usage(config.max_experiments, config.max_predictions, config.max_search,
+                      config.max_model_tokens, 0, config.max_verification_outputs)
+        if not usage_within(usage + reserve, limit):
             archive.append("budget_stop", {"usage": usage, "reservation": reserve, "label": label})
             raise BudgetStop("preregistered execution budget exhausted")
-        before_verification = adapter.verification_outputs
-        evidence = evaluate_pair(adapter, tasks, s, c, generation, config.search_budget, archive, label)
+        evidence = evaluate_pair(adapter, tasks, s, c, generation, config.search_budget, archive, label, runtime=runtime)
         for e in evidence:
             usage = usage + e.usage
-        usage = usage + Usage(verification_outputs=adapter.verification_outputs - before_verification)
         return evidence
 
     try:
@@ -109,25 +110,39 @@ def run_rsi(adapter, out, config=None, proposer=None):
             # Save these parents; no assignment below can change frozen opponents.
             c_parent, s_parent = challenger, scientist
             training = evaluate(train, s_parent, c_parent, generation, "train")
-            proposal = Challenger(c_parent).propose(caps, generation)
-            if usage.verification_outputs + adapter.certification_budget() > config.max_verification_outputs:
-                raise BudgetStop("world certification budget exhausted")
-            before_verification = adapter.verification_outputs
-            certificate = adapter.compile_challenge(proposal)
-            usage = usage + Usage(verification_outputs=adapter.verification_outputs - before_verification)
-            archive.append("world_attempt", {"proposal": proposal, "certification": certificate})
-            if certificate.status == Status.VERIFIED:
-                training += evaluate((certificate.task,), s_parent, c_parent, generation, "generated-train")
+            proposal = runtime.propose(public_context, c_parent, s_parent, training, generation)
+            if proposal is not None:
+                reserved = adapter.estimate_certification()
+                limit = Usage(config.max_experiments, config.max_predictions, config.max_search,
+                              config.max_model_tokens, 0, config.max_verification_outputs)
+                if not usage_within(usage + reserved, limit):
+                    raise BudgetStop("world certification budget exhausted")
+                before = adapter.meter()
+                certificate = adapter.compile_challenge(proposal)
+                after = adapter.meter()
+                cost = Usage(*(getattr(after, name) - getattr(before, name) for name in before.__dataclass_fields__))
+                if not usage_within(cost, reserved):
+                    raise ProtocolError("certification exceeded declared reservation")
+                usage = usage + cost
+                archive.append("world_attempt", {"proposal": proposal, "certification": certificate, "usage": cost})
+                if certificate.status == Status.VERIFIED:
+                    if certificate.task is None or certificate.task.split != "train" or certificate.task.domain_id != adapter.domain_id:
+                        raise ProtocolError("certified generated worlds must remain in the train partition")
+                    training += evaluate((certificate.task,), s_parent, c_parent, generation, "generated-train")
+            elif config.required_world_tracks:
+                raise CapabilityUnsupported("runtime did not implement required world creation")
+            else:
+                archive.append("scope_limitation", {"feature": "world-creation", "status": "CAPABILITY_UNSUPPORTED"})
             diagnosis = diagnose(s_parent.meta, training)
             if proposer is None:
-                c_attempts = candidates(c_parent, diagnosis, training, caps, config.candidate_limit, config.mode)
-                s_attempts = candidates(s_parent, diagnosis, training, caps, config.candidate_limit, config.mode)
+                c_attempts = runtime.candidates(c_parent, diagnosis, training, public_context, config.candidate_limit, config.mode)
+                s_attempts = runtime.candidates(s_parent, diagnosis, training, public_context, config.candidate_limit, config.mode)
             else:
                 before_tokens = proposer.total_tokens
                 before_calls = len(proposer.calls)
                 try:
-                    c_attempts = proposer.propose(c_parent, diagnosis, training, caps, config.candidate_limit, config.mode)
-                    s_attempts = proposer.propose(s_parent, diagnosis, training, caps, config.candidate_limit, config.mode)
+                    c_attempts = proposer.propose(c_parent, diagnosis, training, public_context, config.candidate_limit, config.mode)
+                    s_attempts = proposer.propose(s_parent, diagnosis, training, public_context, config.candidate_limit, config.mode)
                 except Exception as exc:
                     archive.append("model_generation_failure", {"type": type(exc).__name__, "reason": str(exc)})
                     raise
@@ -165,8 +180,8 @@ def run_rsi(adapter, out, config=None, proposer=None):
                     # and adaptation budget fixed. Compare inventions it produces.
                     meta_gate = None
                     if child.meta != parent.meta and gate.decision == Decision.ACCEPT:
-                        old_adapt, _ = invent(parent, diagnosis, caps, parent.meta.operators[0])
-                        new_adapt, _ = invent(parent, diagnosis, caps, child.meta.operators[0])
+                        old_adapt, _ = runtime.adapt(parent, diagnosis, public_context, parent.meta)
+                        new_adapt, _ = runtime.adapt(parent, diagnosis, public_context, child.meta)
                         old_e = evaluate(dev, old_adapt if role == "scientist" else s_parent,
                                          old_adapt if role == "challenger" else c_parent, generation, "meta-parent")
                         new_e = evaluate(dev, new_adapt if role == "scientist" else s_parent,
@@ -233,7 +248,9 @@ def run_rsi(adapter, out, config=None, proposer=None):
     # in the same output directory; training/selection never uses this result.
     archive.marker("final_started.json", {"frozen_hash": digest(frozen)})
     adapter.unseal_for_final()
-    test = adapter.sample("test", config.seed + 2)
+    test = checked_sample(adapter, "test", config.seed + 2)
+    if {t.task_id for t in test} & {t.task_id for t in train + dev}:
+        raise ProtocolError("sealed test overlaps training/development tasks")
     try:
         final = evaluate(test, scientist, challenger, -1, "sealed-final-test")
         final_score = mean(e.score.value for e in final)
@@ -244,9 +261,10 @@ def run_rsi(adapter, out, config=None, proposer=None):
     summary = {"domain": adapter.domain_id, "status": final_status, "stop_reason": stop_reason,
                "test_score": final_score, "generations": history, "usage": usage,
                "challenger": challenger, "scientist": scientist,
-               "limitations": ["synthetic bounded DSL and deterministic enumerative agents",
-                               "no API calls, weight training, GPU measurement or external benchmark result",
-                               "bootstrap with few clusters is an engineering gate, not paper-level evidence"]}
+               "protocol": negotiated, "runtime_id": runtime.runtime_id,
+               "limitations": list(caps.limitations) + [
+                   "M1 protocol implementation does not complete M2-M7 invention or training",
+                   "bootstrap with few clusters is an engineering gate, not paper-level evidence"]}
     archive.append("summary", summary)
     archive.marker("summary.json", summary)
     return plain(summary)
