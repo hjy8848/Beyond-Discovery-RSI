@@ -1,7 +1,7 @@
 """Immutable public protocol. Oracle contents never enter an agent context."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, fields
 from enum import Enum
 import hashlib
 import json
@@ -9,8 +9,10 @@ from typing import Any, Optional, Protocol, Tuple
 
 
 def plain(value: Any) -> Any:
+    if hasattr(value, "to_json"):
+        return plain(value.to_json())
     if hasattr(value, "__dataclass_fields__"):
-        return plain(asdict(value))
+        return {f.name: plain(getattr(value, f.name)) for f in fields(value)}
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, dict):
@@ -77,9 +79,9 @@ class TaskRef:
 
 @dataclass(frozen=True)
 class Claim:
-    program: tuple
+    program: Any
     assumption: str
-    scope: str = "bounded adapter input space"
+    scope: str = "adapter-declared experimental scope"
 
 
 @dataclass(frozen=True)
@@ -91,7 +93,7 @@ class ExperimentProgram:
 @dataclass(frozen=True)
 class ChallengeProposal:
     domain_id: str
-    program: tuple
+    program: Any
     track: str = "A"
     # No answer field: authors have no authority to certify a world.
 
@@ -109,8 +111,10 @@ class Certification:
 
 @dataclass(frozen=True)
 class Observation:
-    action: tuple
-    outcome: int
+    action: Any
+    outcome: Any
+    sequence: int = 0
+    terminal: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,8 +129,8 @@ class Score:
 class Boundary:
     assumption: str
     witness: Observation
-    old_prediction: int
-    alternative_prediction: Optional[int]
+    old_prediction: Any
+    alternative_prediction: Optional[Any]
     reproduced: bool
     source_cluster: str
 
@@ -143,6 +147,7 @@ class EvidenceBundle:
     behavior_hash: str
     usage: Usage
     failure: Optional[str] = None
+    allocation: Optional[Usage] = None
 
     def agent_view(self) -> dict:
         if self.task.split != "train":
@@ -179,6 +184,7 @@ class Snapshot:
     generation: int = 0
     parent_hash: Optional[str] = None
     knowledge: Tuple[str, ...] = ()
+    artifacts: Tuple[Any, ...] = ()
 
     @property
     def content_hash(self) -> str:
@@ -205,14 +211,16 @@ class GateResult:
 class DomainAdapter(Protocol):
     domain_id: str
     verifier_version: str
-    verification_outputs: int
-
-    def capabilities(self) -> dict: ...
+    def describe(self) -> Any: ...
+    def estimate_episode(self, action_budget: int, search_budget: int) -> Usage: ...
+    def estimate_certification(self) -> Usage: ...
+    def meter(self) -> Usage: ...
+    def close(self, session: Any) -> None: ...
     def sample(self, split: str, seed: int) -> Tuple[TaskRef, ...]: ...
     def compile_challenge(self, proposal: ChallengeProposal) -> Certification: ...
     def begin(self, task: TaskRef, budget: int) -> Any: ...
-    def step(self, session: Any, action: tuple) -> Observation: ...
+    def initial_observation(self, session: Any) -> Any: ...
+    def step(self, session: Any, action: Any) -> Observation: ...
     def evaluate(self, submission: Claim, task: TaskRef, split: str) -> Score: ...
     def audit(self, evidence: EvidenceBundle) -> bool: ...
-    def certification_budget(self) -> int: ...
     def unseal_for_final(self) -> None: ...

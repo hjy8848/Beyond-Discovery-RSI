@@ -1,51 +1,26 @@
-from __future__ import annotations
-
+"""Domain-neutral episode dispatch and fixed selection metrics."""
 from dataclasses import replace
-
-from ..agents.scientist import Scientist
-from ..agents.challenger import Challenger
-from ..runtime.policy_runtime import predict
-from .contracts import Boundary, EvidenceBundle, Provenance, Usage, digest
+from .protocol import negotiate, usage_within, ProtocolError
 
 
-def episode(adapter, task, scientist_snapshot, challenger_snapshot, generation, search_budget=256):
-    caps = adapter.capabilities()
-    scientist = Scientist(scientist_snapshot, caps, search_budget)
-    experiment_driver = challenger_snapshot
-    if scientist_snapshot.experiment.strategy == "disagreement":
-        experiment_driver = replace(challenger_snapshot, experiment=replace(challenger_snapshot.experiment, strategy="disagreement"))
-    challenger = Challenger(experiment_driver)
+def episode(adapter, task, scientist_snapshot, challenger_snapshot, generation, search_budget=256, runtime=None):
+    from ..runtime.research import resolve_runtime
+    runtime = runtime or resolve_runtime(adapter)
     budget = min(scientist_snapshot.experiment.action_budget, challenger_snapshot.experiment.action_budget)
-    session = adapter.begin(task, budget)
-    observations = []
-    for _ in range(budget):
-        action = challenger.discriminate(caps, scientist, observations)
-        observations.append(adapter.step(session, action))
-    claim = scientist.hypothesize(observations)
-    # A contradiction to the fitted restricted family, not an LLM introspection.
-    boundaries = []
-    for observation in observations:
-        predicted = predict(claim.program, observation.action)
-        if predicted != observation.outcome:
-            reproduced = adapter.step(adapter.begin(task, 1), observation.action) == observation
-            boundaries.append(Boundary(claim.assumption, observation, predicted, None,
-                                       reproduced, task.source_cluster))
-    score = adapter.evaluate(claim, task, task.split)
-    behavior = tuple(predict(claim.program, x) for x in caps["input_space"])
-    evidence = EvidenceBundle(
-        Provenance(adapter.domain_id, task.split, "real-execution", generation,
-                   scientist_snapshot.content_hash, task.seed, adapter.verifier_version,
-                   scientist_snapshot.parent_hash),
-        task, tuple(observations), claim, claim, score, tuple(boundaries), digest(behavior),
-        Usage(experiments=budget + len(boundaries), predictions=4 * score.cost,
-              search=len(scientist.programs)))
-    if not adapter.audit(evidence):
-        raise RuntimeError("independent evidence audit failed")
-    return evidence
+    negotiate(adapter.describe(), runtime.languages, budget)
+    if task.domain_id != adapter.domain_id:
+        raise ProtocolError("task domain mismatch")
+    reserved = adapter.estimate_episode(budget, search_budget)
+    if not usage_within(reserved, reserved):
+        raise ProtocolError("adapter declared an invalid resource reservation")
+    evidence = runtime.episode(adapter, task, scientist_snapshot, challenger_snapshot, generation, search_budget)
+    if not usage_within(evidence.usage, reserved):
+        raise ProtocolError("runtime exceeded its predeclared resource reservation")
+    return replace(evidence, allocation=reserved)
 
 
-def evaluate_pair(adapter, tasks, scientist, challenger, generation, search_budget, archive, label):
-    evidence = tuple(episode(adapter, t, scientist, challenger, generation, search_budget) for t in tasks)
+def evaluate_pair(adapter, tasks, scientist, challenger, generation, search_budget, archive, label, runtime=None):
+    evidence = tuple(episode(adapter, t, scientist, challenger, generation, search_budget, runtime=runtime) for t in tasks)
     for item in evidence:
         archive.append("episode", {"label": label, "scientist": scientist,
                                    "challenger": challenger, "evidence": item})
@@ -66,7 +41,7 @@ def rows(evidence, role):
             novel = key not in seen
             seen.add(key)
             value = float(novel and any(b.reproduced for b in e.boundaries)) / max(1, e.usage.experiments)
-        allocated_cost = 2 * len(e.observations) + e.score.cost + 512
+        allocated_cost = allocation_cost(e)
         result.append((e.task.source_cluster, value, e.score.valid and e.failure is None, allocated_cost, e.task.task_id))
     return tuple(result)
 
@@ -90,5 +65,12 @@ def invention_rows(frozen, adapted, role):
                        and all(b.reproduced for b in new.boundaries)
                        and not old.boundaries)
         result.append((new.task.source_cluster, float(success), new.score.valid,
-                       2 * len(new.observations) + new.score.cost + 512, new.task.task_id))
+                       allocation_cost(new), new.task.task_id))
     return tuple(result)
+
+
+def allocation_cost(evidence):
+    # Gate consumes a fixed budget-allocation scalar; preserve its comparison
+    # rule while sourcing allocation from domain resource contracts.
+    allocation = evidence.allocation or evidence.usage
+    return sum(getattr(allocation, name) for name in allocation.__dataclass_fields__)
