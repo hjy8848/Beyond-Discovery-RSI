@@ -4,11 +4,13 @@ import json
 from .synthesis import SynthesisRuntime, grammar_from
 from .expression import typecheck, freeze
 from .trainer import LoRABackend, TrainingRecord
-from ..core.contracts import ChallengeProposal, Usage, canonical, digest, plain
+from ..core.contracts import ChallengeProposal, Usage, ModelState, canonical, digest, plain
 from ..core.experiments import protocol_actions
-from ..core.meta import meta_artifact, META_VARIABLES
+from ..core.meta import meta_artifact, META_VARIABLES, score as meta_score
+from ..core.synthesis import enumerate_programs, errors
 from ..core.protocol import ProtocolError, CapabilityUnsupported
 from ..core.training import train_role
+from ..core.interaction import rows
 from ..core.worlds import expression_from
 
 
@@ -26,11 +28,23 @@ def strict_json(text):
 class ModelResearchRuntime(SynthesisRuntime):
     # Artifact execution is identical to synthesis; replay never repeats API calls.
     runtime_id='evidence-synthesis-v1'
-    def __init__(self,context,clients,training=None):
+    def __init__(self,context,clients,training=None,evolution="hybrid"):
         super().__init__(context)
         if set(clients)!={'scientist','challenger'}: raise ValueError('two role clients required')
-        self.clients=clients; self.training_config=training
+        if evolution not in ('program-only','lora-only','hybrid'): raise ValueError('weight control')
+        if evolution=='lora-only' and training is None: raise ValueError('LoRA-only requires training')
+        if evolution=='program-only' and training is not None: raise ValueError('program-only cannot train')
+        self.clients=clients; self.training_config=training; self.evolution=evolution
+        self.templates={}
         self.model_events=[]; self.sampled={}; self.total_training_steps=0
+
+    def initial_pair(self,config):
+        self.adaptation_candidates=config.candidate_limit
+        return super().initial_pair(config)
+
+    def validate_mode(self,mode):
+        if mode not in ('full','fixed','no_restructuring','no_falsification','no_meta'):
+            raise CapabilityUnsupported('CAPABILITY_UNSUPPORTED: selected control is implemented by the search runtime only')
 
     @property
     def total_model_tokens(self):
@@ -44,7 +58,8 @@ class ModelResearchRuntime(SynthesisRuntime):
         if parent.model.delta_checkpoint and not hasattr(client,'prepare'):
             raise CapabilityUnsupported('CAPABILITY_UNSUPPORTED: remote client cannot load local adapter')
         if hasattr(client,'prepare'): client.prepare(parent.model)
-        prompt=canonical({'task':kind,'role':parent.role,'public_context':context,'parent':parent,
+        prompt_parent=replace(parent,model=ModelState(parent.model.base_model,parent.role)) if self.evolution=='lora-only' else parent
+        prompt=canonical({'task':kind,'role':parent.role,'public_context':context,'parent':prompt_parent,
                           'meta_policy':meta or parent.meta,'train_evidence':[e.agent_view() for e in training],
                           'limit':limit,'contract':{'world':'JSON object: expression (typed AST), track (A/B)',
                           'candidate':'JSON list of objects: grammar (optional complete typed grammar), experiment (optional action list), meta (optional scoring AST). Pure code only; no answers or verifier changes.'}})
@@ -72,13 +87,18 @@ class ModelResearchRuntime(SynthesisRuntime):
     def candidates(self,parent,diagnosis,training,public_context,limit,mode):
         self.training=training
         if mode=='fixed': return ()
-        data=self._call(parent,'candidate',training,public_context,limit)
+        if self.evolution=='lora-only':
+            if parent.role not in self.templates: self.templates[parent.role]=parent
+            template=self.templates[parent.role]
+            generation_parent=replace(template,model=parent.model)
+        else: generation_parent=parent
+        data=self._call(generation_parent,'candidate',training,public_context,limit)
         if not isinstance(data,list) or len(data)>limit: raise ProtocolError('model candidate count')
         results=[]
         for item in data:
             if not isinstance(item,dict) or not item or not set(item)<={'grammar','experiment','meta'}:
                 raise ProtocolError('model candidate schema')
-            artifacts=list(parent.artifacts); meta=parent.meta; provenance=self.provenance(parent)
+            artifacts=list(generation_parent.artifacts); meta=generation_parent.meta; provenance=self.provenance(parent)
             if 'grammar' in item and mode!='no_restructuring':
                 grammar=grammar_from(item['grammar']); allowed=grammar_from(public_context['grammar'])
                 if grammar.variables!=allowed.variables or grammar.output_type!=allowed.output_type or not set(grammar.operators)<=set(allowed.operators):
@@ -93,24 +113,39 @@ class ModelResearchRuntime(SynthesisRuntime):
                 for a in actions:
                     if plain(a) not in public_context['actions']: raise ProtocolError('model action outside public domain')
                 artifacts=[a for a in artifacts if a.kind!='experiment']+[experiment]
-            if 'meta' in item and mode!='no_meta':
+            if 'meta' in item and mode!='no_meta' and self.evolution!='lora-only':
                 program=meta_artifact(freeze(item['meta']),provenance)
                 if typecheck(freeze(item["meta"]),dict(META_VARIABLES))!="integer": raise ProtocolError("meta type mismatch")
                 meta=replace(meta,program=program,revision=meta.revision+1)
             child=replace(parent,artifacts=tuple(artifacts),meta=meta,parent_hash=parent.content_hash,generation=parent.generation+1)
-            results.append((child,{'operator':'MODEL_CODE','request_hash':digest(self.sampled[(parent.content_hash,'candidate')][0])}))
+            results.append((child,{'operator':'MODEL_CODE','request_hash':digest(self.sampled[(generation_parent.content_hash,'candidate')][0])}))
+        if parent.meta.program is not None and len(results)>1:
+            def rank(attempt):
+                child,_=attempt
+                self.charge_search(self.search_budget)
+                programs=enumerate_programs(self.grammar(child),self.search_budget).programs
+                datasets=tuple(self.examples(e) for e in training)
+                losses=[min((errors(p,examples) for p in programs),default=len(examples)) for examples in datasets]
+                facts={'errors':sum(losses),'complexity':sum(len(a.source) for a in child.artifacts),
+                       'cost':len(programs),'novelty':sum(a not in parent.artifacts for a in child.artifacts),
+                       'coverage':sum(x==0 for x in losses)}
+                return -meta_score(parent.meta.program,facts),child.content_hash
+            results.sort(key=rank)
         return tuple(results)
 
     def trained_candidates(self,parent,attempts,training,evaluate,root):
         if self.training_config is None or not attempts: return attempts
         if not hasattr(self.clients[parent.role],'prepare'): raise CapabilityUnsupported('CAPABILITY_UNSUPPORTED: training requires a checkpoint-capable local client')
-        prompt,result,hashes=self.sampled[(parent.content_hash,'candidate')]
+        template=self.templates.get(parent.role,parent)
+        generation_parent=replace(template,model=parent.model) if self.evolution=='lora-only' else parent
+        prompt,result,hashes=self.sampled[(generation_parent.content_hash,'candidate')]
         # Rewards come exclusively from independent TRAIN execution, not agent answers.
         evaluated=[evaluate(child) for child,_ in attempts]
-        reward=sum(e.score.value if e.score.valid else 0 for batch in evaluated for e in batch)/sum(len(b) for b in evaluated)
+        reward_rows=tuple(row for batch in evaluated for row in rows(batch,parent.role))
+        reward=sum(row[1] if row[2] else 0 for row in reward_rows)/len(reward_rows)
         if reward<=0:
             self.events.append({'type':'training-skipped','role':parent.role,'reason':'no useful verified train rollout'})
-            return attempts
+            return () if self.evolution=='lora-only' else attempts
         record=TrainingRecord(prompt,result.text,hashes,reward,behavior_logprob=result.behavior_logprob,policy_id=result.policy_id,prompt_ids=result.prompt_ids,completion_ids=result.completion_ids)
         steps=self.training_config.get('steps',1)
         if self.total_training_steps+steps>self.training_config['max_steps']: raise ProtocolError('TRAINING_STEP_BUDGET_EXHAUSTED')
@@ -120,9 +155,12 @@ class ModelResearchRuntime(SynthesisRuntime):
         trained=train_role(parent,training,backend,root)
         self.events.extend({'type':'training-receipt',**r} for r in backend.receipts)
         generated=self.candidates(trained,None,training,self.public,len(attempts),'full')
-        return tuple((child,{'operator':'TRAINED_MODEL_CODE','checkpoint':trained.model.delta_checkpoint,'patch':patch}) for child,patch in generated)
+        return tuple((child,{'operator':'TRAINED_MODEL_CODE','checkpoint':trained.model.delta_checkpoint,'patch':patch,
+                             'evolution':self.evolution,'fixed_template':template.content_hash,
+                             'weight_control':attempts[min(i,len(attempts)-1)][0] if self.evolution=='lora-only' else None})
+                     for i,(child,patch) in enumerate(generated))
 
     def adapt(self,parent,diagnosis,public_context,meta):
         # Fixed parent weights/program, fixed train opportunity and output cap.
-        attempts=self.candidates(replace(parent,meta=meta),diagnosis,self.training,public_context,1,'full')
+        attempts=self.candidates(replace(parent,meta=meta),diagnosis,self.training,public_context,self.adaptation_candidates,'full')
         return attempts[0] if attempts else (parent,None)

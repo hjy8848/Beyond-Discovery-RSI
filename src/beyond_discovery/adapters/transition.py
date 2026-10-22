@@ -74,7 +74,7 @@ class TransitionAdapter:
                             "required":["operation","arguments"],"additionalProperties":False})
         result = Schema.of({"type":self.output_type})
         return DomainCapabilities(self.domain_id,action,result,result,("research-expression-v1",),("A","B"),8,
-                                  features=("audit","sealed-test","stateful","structured-observations"),
+                                  features=("audit","sealed-test","stateful","structured-observations","world-budget-certification"),
                                   limitations=("controlled finite primitive-action probes; not an external benchmark",))
 
     def sample(self,split,seed):
@@ -177,21 +177,25 @@ class TransitionAdapter:
             return self.evaluate(e.new_claim,e.task,e.task.split)==e.score
         except (ProtocolError,TypeError,ValueError,KeyError): return False
 
-    def compile_challenge(self,proposal):
+    def compile_challenge(self,proposal,action_budget=8):
         if proposal.domain_id!=self.domain_id: raise ProtocolError("world domain mismatch")
         artifact=proposal.program
-        node=expression_from(artifact)
-        data=json.loads(artifact.source)
-        # Actual frozen model source is supplied as typed code, not as answers.
-        models=tuple(freeze_expression(x) for x in data.get("models",()))
-        audit=self._certifier.certify(artifact,proposal.track,models,200000)
+        try:
+            node=expression_from(artifact)
+            data=json.loads(artifact.source)
+            # Author claims are code, never trusted labels. Final reward requires
+            # actual interaction with the controller's frozen Scientist.
+            models=tuple(freeze_expression(x) for x in data.get("models",()))
+            audit=self._certifier.certify(artifact,proposal.track,models,200000,action_budget)
+        except (ProtocolError,ValueError,TypeError,KeyError,IndexError):
+            return Certification(Status.INVALID,None,"",digest(artifact),self.verifier_version,"malformed executable world",())
         self._usage=self._usage+Usage(verification_outputs=audit.evaluations)
         task=None
         if audit.status==Status.VERIFIED:
             task=TaskRef(digest((self.domain_id,"generated",artifact.content_hash)),self.domain_id,"train","generated/"+audit.fingerprint,0)
             self._refs[task.task_id]=task; self._worlds[task.task_id]=node
         return Certification(audit.status,task,digest(node),artifact.content_hash,audit.semantics_version,audit.reason,
-                             (audit.fingerprint,plain(audit.witness),audit.evaluations))
+                             (audit.fingerprint,plain(audit.witness),audit.evaluations,plain(audit.identification)))
 
 
 def freeze_expression(value):

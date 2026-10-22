@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 import math
+import time
 from pathlib import Path
 from ..core.contracts import ModelState, digest
 from ..core.protocol import CapabilityUnsupported, ProtocolError
@@ -45,6 +46,7 @@ class LoRABackend:
         self.learning_rate=learning_rate; self.device=device; self.max_sequence=max_sequence; self.receipts=[]
 
     def fit(self, state, batch, output_directory):
+        started=time.perf_counter()
         validate_records(self.records,batch,self.algorithm)
         try:
             import torch
@@ -64,7 +66,7 @@ class LoRABackend:
         before=[p.detach().clone() for p in parameters]
         optimizer=torch.optim.AdamW(parameters,lr=self.learning_rate)
         losses=[]; tokens=0
-        model.train()
+        model.train() if self.algorithm=="sft" else model.eval()
         for i in range(self.steps):
             r=self.records[i%len(self.records)]
             prefix=tokenizer.encode(r.prompt,add_special_tokens=True)
@@ -99,7 +101,7 @@ class LoRABackend:
         files={str(p.relative_to(output)):sha256(p.read_bytes()).hexdigest() for p in output.rglob('*') if p.is_file()}
         receipt={'role':state.role,'base_model':state.base_model,'training_data_hash':digest(batch),
                  'records_hash':digest(self.records),'algorithm':self.algorithm,'steps':self.steps,'tokens':tokens,
-                 'losses':losses,'device':self.device,'files':files,'parent_checkpoint':state.delta_checkpoint}
+                 'losses':losses,'device':self.device,'elapsed_seconds':time.perf_counter()-started,'files':files,'parent_checkpoint':state.delta_checkpoint}
         manifest=output/'manifest.json'; manifest.write_text(json.dumps(receipt,indent=2))
         self.receipts.append(receipt)
         return ModelState(state.base_model,state.role,str(manifest.resolve()),digest(batch))

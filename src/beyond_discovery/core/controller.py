@@ -40,7 +40,7 @@ class RunConfig:
             raise ValueError("execution budget bounds")
         if min(self.max_experiments, self.max_predictions, self.max_search, self.max_verification_outputs, self.stagnation_patience, self.max_model_tokens, self.max_training_steps) < 1:
             raise ValueError("invalid stop budget")
-        if self.mode not in ("full", "fixed", "program_evolution", "no_restructuring", "no_meta"):
+        if self.mode not in ("full", "fixed", "fixed_challenger", "program_evolution", "no_restructuring", "no_meta", "no_diagnosis", "no_falsification", "reflection", "random_challenger", "hardness_first"):
             raise ValueError("unsupported baseline/ablation")
         if not 0 < self.gate.confidence < 1 or self.gate.min_clusters < 2 or self.gate.bootstrap_samples < 100:
             raise ValueError("invalid statistical preregistration")
@@ -60,6 +60,15 @@ def implementation_hash():
 
 
 def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
+    from ..runtime.sandbox import ResearchSandbox
+    runtime=runtime or resolve_runtime(adapter)
+    if "research-expression-v1" in runtime.languages:
+        with ResearchSandbox():
+            return _run_rsi(adapter,out,config,proposer,runtime)
+    return _run_rsi(adapter,out,config,proposer,runtime)
+
+
+def _run_rsi(adapter, out, config=None, proposer=None, runtime=None):
     config = config or RunConfig()
     config.validate()
     caps = adapter.describe()
@@ -80,7 +89,11 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
     if {t.task_id for t in train} & {t.task_id for t in dev}:
         raise ProtocolError("train/dev task partitions overlap")
     archive = Archive(out)
-    prereg = {"config": config, "capabilities": caps, "negotiated_protocol": negotiated,
+    from ..runtime.sandbox import executor
+    sandbox=executor.get()
+    sandbox_limits=None if sandbox is None else {'memory_bytes':sandbox.memory,'memory_mode':sandbox.memory_mode,
+                                                 'cpu_seconds':sandbox.cpu,'wall_seconds':sandbox.wall,'call_timeout':sandbox.timeout}
+    prereg = {"sandbox_limits":sandbox_limits,"config": config, "capabilities": caps, "negotiated_protocol": negotiated,
               "runtime_id": runtime.runtime_id, "implementation_hash": implementation_hash(),
               "train": train, "dev": dev, "initial_challenger": challenger,
               "initial_scientist": scientist, "joint_fallback": "rollback-both",
@@ -112,12 +125,21 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
         if usage.search>config.max_search or usage.model_tokens>config.max_model_tokens or usage.training_steps>config.max_training_steps:
             raise BudgetStop("generation resource budget exhausted")
 
+    def charge_prediction():
+        nonlocal usage
+        if usage.predictions>=config.max_predictions: raise BudgetStop("generation prediction budget exhausted")
+        usage=usage+Usage(predictions=1)
+
     def generate(call):
+        from ..runtime.expression import prediction_meter
+        token=prediction_meter.set(charge_prediction)
         try: return call()
         except Exception as exc:
             archive.append("generation_failure",{"error_type":type(exc).__name__})
             raise
-        finally: flush_runtime()
+        finally:
+            prediction_meter.reset(token)
+            flush_runtime()
 
     def reserve_search(amount):
         if usage.search+getattr(runtime,"total_search",0)-runtime_cost.search+amount>config.max_search: raise BudgetStop("generation search budget exhausted")
@@ -136,7 +158,11 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
         if not usage_within(usage + reserve, limit):
             archive.append("budget_stop", {"usage": usage, "reservation": reserve, "label": label})
             raise BudgetStop("preregistered execution budget exhausted")
-        evidence = evaluate_pair(adapter, tasks, s, c, generation, config.search_budget, archive, label, runtime=runtime)
+        from ..runtime.expression import prediction_meter
+        token=prediction_meter.set(None)
+        try:
+            evidence = evaluate_pair(adapter, tasks, s, c, generation, config.search_budget, archive, label, runtime=runtime)
+        finally: prediction_meter.reset(token)
         for e in evidence:
             usage = usage + e.usage
         return evidence
@@ -146,6 +172,8 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
             # Save these parents; no assignment below can change frozen opponents.
             c_parent, s_parent = challenger, scientist
             training = evaluate(train, s_parent, c_parent, generation, "train")
+            runtime.mode=config.mode
+            runtime.seed=config.seed
             proposal = generate(lambda: runtime.propose(public_context, c_parent, s_parent, training, generation))
             if proposal is not None:
                 reserved = adapter.estimate_certification()
@@ -154,7 +182,7 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
                 if not usage_within(usage + reserved, limit):
                     raise BudgetStop("world certification budget exhausted")
                 before = adapter.meter()
-                certificate = adapter.compile_challenge(proposal)
+                certificate = adapter.compile_challenge(proposal, **({"action_budget":config.action_budget} if "world-budget-certification" in caps.features else {}))
                 after = adapter.meter()
                 cost = Usage(*(getattr(after, name) - getattr(before, name) for name in before.__dataclass_fields__))
                 if not usage_within(cost, reserved):
@@ -190,9 +218,9 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
                     raise BudgetStop("reported model-token budget exceeded; no candidate selected")
             if hasattr(runtime,"trained_candidates"):
                 c_attempts=generate(lambda: runtime.trained_candidates(c_parent,c_attempts,training,
-                    lambda child: evaluate(train,s_parent,child,generation,"train-model-reward-c"), Path(out)/"checkpoints"))
+                    lambda child: evaluate(train,s_parent,child,generation,"train-model-reward-c"), Path(out)/"checkpoints"/str(generation)))
                 s_attempts=generate(lambda: runtime.trained_candidates(s_parent,s_attempts,training,
-                    lambda child: evaluate(train,child,c_parent,generation,"train-model-reward-s"), Path(out)/"checkpoints"))
+                    lambda child: evaluate(train,child,c_parent,generation,"train-model-reward-s"), Path(out)/"checkpoints"/str(generation)))
             # Stage barrier: both candidate lists persisted before any private dev.
             archive.append("candidate_barrier", {"generation": generation, "parents": (c_parent, s_parent),
                                                   "diagnosis": diagnosis, "challenger": c_attempts, "scientist": s_attempts})
@@ -206,7 +234,12 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
                     s_eval = child if role == "scientist" else s_parent
                     c_eval = child if role == "challenger" else c_parent
                     observed = evaluate(dev, s_eval, c_eval, generation, "dev-%s-%s" % (role, index))
-                    gate = paired_gate(rows(baseline, role), rows(observed, role), config.gate,
+                    control=patch.get('weight_control') if isinstance(patch,dict) else None
+                    gate_baseline=baseline
+                    if control is not None:
+                        gate_baseline=evaluate(dev,control if role=="scientist" else s_parent,
+                                               control if role=="challenger" else c_parent,generation,"dev-fixed-program-weight-control")
+                    gate = paired_gate(rows(gate_baseline, role), rows(observed, role), config.gate,
                                        config.seed + generation, len(attempts))
                     # Refit each candidate on TRAIN only for controlled behavioral
                     # novelty and improvement. Dev never becomes invention input.
@@ -214,8 +247,9 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
                     if role == "scientist" and gate.decision == Decision.ACCEPT:
                         method_signature = digest(tuple((e.task.task_id, e.behavior_hash) for e in observed))
                         diagnostic = evaluate(train, child, c_parent, generation, "train-novelty-%s" % index)
+                        novelty_baseline=training[:len(train)] if control is None else evaluate(train,control,c_parent,generation,"train-fixed-program-weight-control")
                         novelty = any(old.score.value < new.score.value and old.behavior_hash != new.behavior_hash
-                                      for old, new in zip(training[:len(train)], diagnostic))
+                                      for old, new in zip(novelty_baseline, diagnostic))
                         if not novelty:
                             gate = replace(gate, decision=Decision.INCONCLUSIVE, reason="no independently effective behavioral novelty on old failures")
                     # Meta attribution: only replace M, hold task program/weights

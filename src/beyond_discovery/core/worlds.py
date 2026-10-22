@@ -57,6 +57,7 @@ class WorldAudit:
     witness: tuple = ()
     evaluations: int = 0
     semantics_version: str = "independent-expression-world-v1"
+    identification: object = None
 
 
 class WorldCertifier:
@@ -64,7 +65,7 @@ class WorldCertifier:
         self.grammar, self.actions, self.initial, self.horizon = grammar, actions, initial, horizon
         self.seen = set()
 
-    def certify(self, artifact, track, frozen_models, resource_budget):
+    def certify(self, artifact, track, frozen_models, resource_budget, action_budget=8):
         if track not in ("A", "B"): return WorldAudit(Status.INVALID, "unknown world track")
         if not frozen_models: return WorldAudit(Status.PENDING, "no executable frozen hypothesis for discrimination")
         count = 0
@@ -94,8 +95,13 @@ class WorldCertifier:
                 previous_bound = bound(node)
                 limit = 65536 if self.grammar.output_type == "string" else 1000000
                 if previous_bound > limit: raise ProtocolError("world exceeds rollout resource bounds")
-            if track == "A" and node_size(node) > self.grammar.max_nodes:
-                raise ProtocolError("compositional track grammar limit")
+            if track == "A":
+                if node_size(node)>self.grammar.max_nodes: raise ProtocolError("compositional track grammar limit")
+                def registered(n):
+                    if n[0]=='ref': return n[1] in dict(self.grammar.variables)
+                    if n[0]=='lit': return any(type(n[1]) is type(c) and n[1]==c for c in self.grammar.constants)
+                    return n[0] in self.grammar.operators and all(registered(c) for c in n[1:])
+                if not registered(node): raise ProtocolError("compositional track unregistered primitive")
             outputs = []
             witness = ()
             for size in range(1, self.horizon + 1):
@@ -117,15 +123,20 @@ class WorldCertifier:
             if len({digest(trace[-1]) for trace in outputs}) < 2: raise ProtocolError("trivial world")
             if not witness: raise ProtocolError("no distinguishing experiment against frozen hypotheses")
             if fingerprint in self.seen: raise ProtocolError("behavioral duplicate")
+            from .identification import identify_world
+            identification=identify_world(node,self.grammar,self.actions,self.initial,action_budget,resource_budget-count,reference_expression)
+            count+=identification.evaluations
+            if identification.status!=Status.VERIFIED:
+                return WorldAudit(Status.PENDING,"identifiability not established within registered scope/budget",fingerprint,witness,count,identification=identification)
             self.seen.add(fingerprint)
-            return WorldAudit(Status.VERIFIED, "typed executable world; independent semantics; nontrivial; identifiable on declared probes",
-                              fingerprint, witness, count)
+            return WorldAudit(Status.VERIFIED, "typed executable world; independent semantics; nontrivial; bounded identifiability certificate",
+                              fingerprint, witness, count,identification=identification)
         except (ProtocolError, ValueError, TypeError, KeyError, IndexError) as exc:
             return WorldAudit(Status.INVALID, str(exc), evaluations=count)
 
 
 class ChallengerInventor:
-    def propose(self, grammar, actions, initial, old_models, training, provenance, scientist_hash, budget=256, track="A", novel_beyond=0):
+    def propose(self, grammar, actions, initial, old_models, training, provenance, scientist_hash, budget=256, track="A", novel_beyond=0, selection="full", seed=0):
         if provenance.split != "train" or any(e.task.split != "train" for e in training):
             raise PermissionError("challenge generation is train-only")
         if not old_models: raise ProtocolError("challenger requires current executable hypotheses")
@@ -156,7 +167,13 @@ class ChallengerInventor:
             support = sum(evaluate(program, context) == getattr(outcome, "value", outcome) for context, outcome in witness_contexts)
             scored.append(((eliminated, support, conflicts / max(1, node_size(program)), digest(program)), program))
         if not scored: raise ProtocolError("no discriminative challenge found within search budget")
-        node = max(scored)[1]
+        if selection=="random_challenger":
+            import random
+            node=random.Random(seed).choice(sorted((p for _,p in scored),key=digest))
+        elif selection=="hardness_first":
+            node=max(scored,key=lambda item:(item[0][2]*node_size(item[1]),digest(item[1])))[1]
+        else:
+            node = max(scored)[1]
         source = canonical({"expression": node, "models": old_models,
                             "scientist_hash": scientist_hash,
                             "evidence": tuple(digest(e) for e in training)})

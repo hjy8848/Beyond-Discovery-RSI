@@ -1,0 +1,176 @@
+{
+  "domain": "string-transducer",
+  "config": {
+    "generations": 1,
+    "candidate_limit": 3,
+    "action_budget": 8,
+    "search_budget": 256,
+    "max_experiments": 100000,
+    "max_predictions": 10000000,
+    "max_search": 1000000,
+    "max_verification_outputs": 10000000,
+    "stagnation_patience": 2,
+    "seed": 42,
+    "mode": "full",
+    "base_model": "bounded-enumerator-v1",
+    "max_model_tokens": 100000,
+    "max_training_steps": 1000,
+    "gate": {
+      "minimum_gain": 0.01,
+      "max_regression": 0.15,
+      "min_clusters": 4,
+      "bootstrap_samples": 500,
+      "confidence": 0.95
+    },
+    "required_world_tracks": [
+      "A",
+      "B"
+    ]
+  },
+  "results": {
+    "full": {
+      "status": "COMPLETE",
+      "test_score": 1.0,
+      "usage": {
+        "experiments": 853,
+        "predictions": 112795,
+        "search": 39769,
+        "model_tokens": 0,
+        "training_steps": 0,
+        "verification_outputs": 21364
+      },
+      "stop_reason": "generation limit"
+    },
+    "fixed": {
+      "status": "COMPLETE",
+      "test_score": 0.3819444444444444,
+      "usage": {
+        "experiments": 225,
+        "predictions": 16336,
+        "search": 2400,
+        "model_tokens": 0,
+        "training_steps": 0,
+        "verification_outputs": 6336
+      },
+      "stop_reason": "generation limit"
+    },
+    "fixed_challenger": {
+      "status": "COMPLETE",
+      "test_score": 1.0,
+      "usage": {
+        "experiments": 709,
+        "predictions": 98594,
+        "search": 34201,
+        "model_tokens": 0,
+        "training_steps": 0,
+        "verification_outputs": 18020
+      },
+      "stop_reason": "generation limit"
+    },
+    "random_challenger": {
+      "status": "COMPLETE",
+      "test_score": 1.0,
+      "usage": {
+        "experiments": 709,
+        "predictions": 98027,
+        "search": 34201,
+        "model_tokens": 0,
+        "training_steps": 0,
+        "verification_outputs": 18086
+      },
+      "stop_reason": "generation limit"
+    },
+    "hardness_first": {
+      "status": "COMPLETE",
+      "test_score": 1.0,
+      "usage": {
+        "experiments": 708,
+        "predictions": 98782,
+        "search": 34201,
+        "model_tokens": 0,
+        "training_steps": 0,
+        "verification_outputs": 18019
+      },
+      "stop_reason": "generation limit"
+    },
+    "program_evolution": {
+      "status": "COMPLETE",
+      "test_score": 1.0,
+      "usage": {
+        "experiments": 853,
+        "predictions": 114779,
+        "search": 40793,
+        "model_tokens": 0,
+        "training_steps": 0,
+        "verification_outputs": 21364
+      },
+      "stop_reason": "generation limit"
+    },
+    "reflection": {
+      "status": "COMPLETE",
+      "test_score": 0.3819444444444444,
+      "usage": {
+        "experiments": 813,
+        "predictions": 96846,
+        "search": 35984,
+        "model_tokens": 0,
+        "training_steps": 0,
+        "verification_outputs": 19724
+      },
+      "stop_reason": "generation limit"
+    },
+    "no_diagnosis": {
+      "status": "COMPLETE",
+      "test_score": 1.0,
+      "usage": {
+        "experiments": 853,
+        "predictions": 114779,
+        "search": 40793,
+        "model_tokens": 0,
+        "training_steps": 0,
+        "verification_outputs": 21364
+      },
+      "stop_reason": "generation limit"
+    },
+    "no_restructuring": {
+      "status": "COMPLETE",
+      "test_score": 0.3819444444444444,
+      "usage": {
+        "experiments": 515,
+        "predictions": 55557,
+        "search": 18664,
+        "model_tokens": 0,
+        "training_steps": 0,
+        "verification_outputs": 13026
+      },
+      "stop_reason": "generation limit"
+    },
+    "no_falsification": {
+      "status": "COMPLETE",
+      "test_score": 1.0,
+      "usage": {
+        "experiments": 709,
+        "predictions": 98594,
+        "search": 34457,
+        "model_tokens": 0,
+        "training_steps": 0,
+        "verification_outputs": 18020
+      },
+      "stop_reason": "generation limit"
+    },
+    "no_meta": {
+      "status": "COMPLETE",
+      "test_score": 1.0,
+      "usage": {
+        "experiments": 385,
+        "predictions": 38514,
+        "search": 9297,
+        "model_tokens": 0,
+        "training_steps": 0,
+        "verification_outputs": 10496
+      },
+      "stop_reason": "generation limit"
+    }
+  },
+  "interpretation": "engineering controls only; multiple seeds and statistical power required for H1-H4"
+}

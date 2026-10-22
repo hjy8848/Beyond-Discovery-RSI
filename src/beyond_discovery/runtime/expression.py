@@ -4,6 +4,9 @@ The VM has no host calls, file/network access, reflection or dynamic evaluation.
 Public primitive semantics are distinct from domain-specific hidden oracles.
 """
 from functools import lru_cache
+from contextvars import ContextVar
+
+prediction_meter = ContextVar("research_prediction_meter", default=None)
 from ..core.contracts import canonical, plain
 from ..core.protocol import JSONValue, ProtocolError
 
@@ -40,9 +43,9 @@ def node_size(node):
 
 
 def typecheck(node, variables, depth=0):
-    if depth > 8 or not isinstance(node, tuple) or not node: raise ProtocolError("invalid/deep expression")
+    if depth > 8 or not isinstance(node, tuple) or not node or type(node[0]) is not str: raise ProtocolError("invalid/deep expression")
     if node[0] == "ref":
-        if len(node) != 2 or node[1] not in variables: raise ProtocolError("unbound expression reference")
+        if len(node) != 2 or type(node[1]) is not str or node[1] not in variables: raise ProtocolError("unbound expression reference")
         return variables[node[1]]
     if node[0] == "lit":
         if len(node) != 2: raise ProtocolError("invalid literal")
@@ -73,14 +76,21 @@ def apply_primitive(op, args):
 
 
 def evaluate(node, context, fuel=256):
+    meter=prediction_meter.get()
+    if meter is not None: meter()
+    from .sandbox import executor
+    sandbox=executor.get()
+    if sandbox is not None: return sandbox.evaluate(node,context,fuel)
     remaining = [fuel]
     def walk(n, depth):
         remaining[0] -= 1
         if remaining[0] < 0 or depth > 8: raise ProtocolError("expression execution budget")
-        if not isinstance(n, tuple) or not n: raise ProtocolError("invalid expression")
+        if not isinstance(n, tuple) or not n or type(n[0]) is not str: raise ProtocolError("invalid expression")
         if n[0] == "lit":
+            if len(n)!=2: raise ProtocolError("literal arity")
             value = n[1]
         elif n[0] == "ref":
+            if len(n)!=2 or type(n[1]) is not str: raise ProtocolError("reference arity/type")
             value = context
             try:
                 for part in n[1].split("."):
@@ -92,6 +102,7 @@ def evaluate(node, context, fuel=256):
             if signature is None or tuple(value_type(x) for x in args) != signature[0]:
                 raise ProtocolError("invalid primitive execution")
             value = apply_primitive(n[0], args)
+        value_type(value)
         if type(value) is int and abs(value) > 1_000_000: raise ProtocolError("numeric resource bound")
         if type(value) is str and len(value) > 65536: raise ProtocolError("string resource bound")
         return value

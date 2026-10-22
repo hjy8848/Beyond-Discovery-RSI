@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 import urllib.request
 from urllib.parse import urlparse
 from .llm import Completion
@@ -17,18 +18,23 @@ class TokenLedger:
         if type(limit) is not int or limit < 1: raise ValueError("token limit")
         self.limit, self.used = limit, 0
         self.lock = threading.Lock()
+        self.pending = {}
 
     def reserve(self, amount):
         if type(amount) is not int or amount < 1: raise ValueError("token reservation")
         with self.lock:
             if self.used + amount > self.limit: raise ProtocolError("MODEL_TOKEN_BUDGET_EXHAUSTED")
             self.used += amount
+            self.pending[amount]=self.pending.get(amount,0)+1
         return amount
 
     def settle(self, reserved, actual):
         if type(actual) is not int or not 0 <= actual <= reserved:
             raise ProtocolError("MODEL_USAGE_EXCEEDED_RESERVATION")
-        with self.lock: self.used -= reserved - actual
+        with self.lock:
+            if self.pending.get(reserved,0)<1: raise ProtocolError("unknown/already settled token reservation")
+            self.pending[reserved]-=1
+            self.used -= reserved - actual
 
 
 class HTTPModelClient:
@@ -44,6 +50,7 @@ class HTTPModelClient:
             raise ValueError("HTTPS endpoint required")
         if url.username or url.password or url.query or url.fragment: raise ValueError("endpoint credentials/query forbidden")
         if type(input_bound) is not int or input_bound < 1: raise ValueError("explicit provider prompt upper bound required")
+        if proxy and (urlparse(proxy).username or urlparse(proxy).password): raise ValueError("proxy credentials in URLs forbidden")
         self.model, self.url, self.key_env = model, base_url.rstrip('/')+'/chat/completions', key_env
         self.ledger, self.input_bound, self.proxy = ledger, input_bound, proxy
         self.calls = []
@@ -55,6 +62,7 @@ class HTTPModelClient:
         reservation = self.ledger.reserve(self.input_bound + max_tokens)
         entry = {"request":body, "reservation":reservation, "status":"STARTED"}
         self.calls.append(entry)
+        started=time.perf_counter()
         try:
             raw = json.dumps(body).encode()
             if self.proxy and self.proxy.startswith(('socks5://','socks5h://')):
@@ -88,6 +96,8 @@ class HTTPModelClient:
             # Exception text may contain URLs/credentials supplied by a transport.
             entry['status']='FAILED'; entry['error_type']=type(exc).__name__
             raise
+        finally:
+            entry['elapsed_seconds']=time.perf_counter()-started
 
 
 def validate_checkpoint(path, role, base_model):
@@ -99,18 +109,21 @@ def validate_checkpoint(path, role, base_model):
         file=(path.parent/name).resolve()
         if not file.is_relative_to(path.parent) or not file.is_file() or sha256(file.read_bytes()).hexdigest()!=expected:
             raise ProtocolError("checkpoint checksum/path mismatch")
-    if not data['files'] or 'adapter_config.json' not in data['files']: raise ProtocolError("missing adapter payload")
+    if not data['files'] or 'adapter_config.json' not in data['files'] or not any(n.endswith('.safetensors') for n in data['files']): raise ProtocolError("missing adapter payload")
     return data
 
 
 class LocalHFClient:
     """Role-owned HF model, local assets only, actual PEFT checkpoint loading."""
-    def __init__(self, model, role, ledger, checkpoint=None, device='cpu'):
+    def __init__(self, model, role, ledger, checkpoint=None, device='cpu', seed=0):
         self.model,self.role,self.ledger,self.checkpoint,self.device=model,role,ledger,checkpoint,device
-        self.calls=[]; self.loaded=None
+        self.calls=[]; self.loaded=None; self.seed=seed
 
     def prepare(self, state):
         if state.role!=self.role or state.base_model!=self.model: raise ProtocolError("local model identity mismatch")
+        if state.delta_checkpoint:
+            manifest=validate_checkpoint(state.delta_checkpoint,self.role,self.model)
+            if manifest['training_data_hash']!=state.training_data_hash: raise ProtocolError('checkpoint training provenance mismatch')
         if state.delta_checkpoint!=self.checkpoint:
             self.checkpoint=state.delta_checkpoint; self.loaded=None
 
@@ -131,18 +144,34 @@ class LocalHFClient:
         return self.loaded
 
     def __call__(self,prompt,max_tokens):
-        import math
+        entry={'request':prompt,'role':self.role,'status':'STARTED'}
+        self.calls.append(entry); started=time.perf_counter()
+        try:
+            result=self._generate(prompt,max_tokens)
+            entry['response']=result.__dict__; entry['status']='COMPLETE'
+            return result
+        except Exception as exc:
+            entry['status']='FAILED'; entry['error_type']=type(exc).__name__
+            raise
+        finally: entry['elapsed_seconds']=time.perf_counter()-started
+
+    def _generate(self,prompt,max_tokens):
         tokenizer,model=self.load()
         import torch
         encoded=tokenizer(prompt,return_tensors='pt').to(self.device)
         n=encoded['input_ids'].shape[1]
         reserved=self.ledger.reserve(n+max_tokens)
-        with torch.no_grad():
-            result=model.generate(**encoded,max_new_tokens=max_tokens,do_sample=True,top_k=0,top_p=1.0,temperature=1.0,return_dict_in_generate=True,output_scores=True,pad_token_id=tokenizer.eos_token_id)
+        devices=[] if str(self.device)=='cpu' else [torch.device(self.device).index or 0]
+        from transformers import GenerationConfig
+        generation=GenerationConfig(max_new_tokens=max_tokens,do_sample=True,top_k=0,top_p=1.0,temperature=1.0,
+                                    eos_token_id=tokenizer.eos_token_id,pad_token_id=tokenizer.eos_token_id,
+                                    bos_token_id=tokenizer.bos_token_id,return_dict_in_generate=True,output_scores=True)
+        with torch.random.fork_rng(devices=devices), torch.no_grad():
+            torch.manual_seed(self.seed)
+            result=model.generate(**encoded,generation_config=generation)
         ids=result.sequences[0,n:]; count=len(ids)
         self.ledger.settle(reserved,n+count)
         logprob=sum(float(torch.log_softmax(s[0],dim=-1)[ids[i]]) for i,s in enumerate(result.scores))
         text=tokenizer.decode(ids,skip_special_tokens=True)
         completion=Completion(text,self.model,n,count,count==max_tokens,logprob,digest((self.model,self.checkpoint)),tuple(encoded["input_ids"][0].tolist()),tuple(ids.tolist()))
-        self.calls.append({'request':prompt,'response':completion.__dict__,'role':self.role})
         return completion

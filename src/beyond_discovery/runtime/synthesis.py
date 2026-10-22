@@ -43,7 +43,7 @@ class SynthesisRuntime:
         return self.public
 
     def validate_mode(self,mode):
-        if mode not in ("full","fixed","program_evolution","no_restructuring","no_meta","no_diagnosis","no_falsification","reflection","random_challenger","hardness_first"):
+        if mode not in ("full","fixed","fixed_challenger","program_evolution","no_restructuring","no_meta","no_diagnosis","no_falsification","reflection","random_challenger","hardness_first"):
             raise ProtocolError("unsupported synthesis baseline")
 
     def provenance(self,parent=None,role="scientist",domain=None):
@@ -140,11 +140,15 @@ class SynthesisRuntime:
         provenance=self.provenance(challenger,role="challenger")
         actions=tuple(Action.create(a["operation"],a["arguments"]) for a in public_context["actions"])
         try:
-            self.charge_search(self.search_budget)
+            self.charge_search(self.search_budget+2048)
             models=self._rank_models(self.models(training),training,challenger.meta)[:4]
+            if getattr(self,"mode","full") in ("fixed","fixed_challenger"):
+                if not hasattr(self,"fixed_models"): self.fixed_models=models
+                models=self.fixed_models
             return ChallengerInventor().propose(grammar,actions,public_context["initial"],models,training,
                                                 provenance,scientist.content_hash,self.search_budget,
-                                                "A" if generation%2==0 else "B",novel_beyond=3)
+                                                "A" if generation%2==0 else "B",novel_beyond=3,
+                                                selection=getattr(self,"mode","full"),seed=getattr(self,"seed",0)+generation)
         except ProtocolError as exc:
             self.events.append({"type":"challenge-search-failure","reason":str(exc),"generation":generation})
             return None
@@ -165,7 +169,7 @@ class SynthesisRuntime:
 
     def _generate(self,parent,diagnosis,training,public_context,limit,mode,meta):
         if any(e.task.split!="train" for e in training): raise PermissionError("candidate generation is train-only")
-        if mode=="fixed": return ()
+        if mode=="fixed" or (parent.role=="challenger" and mode in ("fixed_challenger","random_challenger","hardness_first")): return ()
         self.public=public_context
         grammar=self.grammar(parent)
         self.charge_search(self.search_budget)
@@ -174,7 +178,8 @@ class SynthesisRuntime:
         actions=tuple(Action.create(a["operation"],a["arguments"]) for a in public_context["actions"])
         provenance=self.provenance(parent,role=parent.role)
         results=[]
-        if parent.role=="scientist" and mode!="no_restructuring":
+        restructure=(mode in ("program_evolution","no_diagnosis","reflection") or (diagnosis is not None and diagnosis.action=="propose_restructure"))
+        if parent.role=="scientist" and mode!="no_restructuring" and restructure:
             pool=[]
             engine=ArtifactInventor(grammar,self.search_budget)
             # The same structural operators work in both domains. No adapter

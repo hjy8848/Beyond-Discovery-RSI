@@ -21,7 +21,9 @@ class WorldTests(unittest.TestCase):
         for track in ("A","B"):
             verifier = WorldCertifier(self.g,self.actions,0)
             world = self.world(("xor",("ref","input.x"),("ref","previous")))
-            result = verifier.certify(world,track,(("ref","input.x"),),100)
+            result = verifier.certify(world,track,(("ref","input.x"),),10000)
+            self.assertEqual(result.identification.status,Status.VERIFIED)
+            self.assertEqual(result.identification.remaining_classes,1)
             self.assertEqual(result.status,Status.VERIFIED)
             self.assertGreater(len(result.witness),1)
             self.assertEqual(verifier.certify(world,track,(("ref","input.x"),),100).status,Status.INVALID)
@@ -42,3 +44,18 @@ class WorldTests(unittest.TestCase):
         b = engine.propose(self.g,self.actions,0,(("ref","input.x"),),(),self.p,"old-b",128)
         self.assertNotEqual(a.program.source,b.program.source)
         with self.assertRaises(PermissionError): engine.propose(self.g,self.actions,0,(("lit",0),),(),replace(self.p,split="dev"),"x",128)
+
+    def test_independent_identifiability_is_scoped_and_requires_action_budget(self):
+        world=self.world(('xor',('ref','input.x'),('ref','previous')))
+        result=self.certifier.certify(world,'A',(('ref','input.x'),),10000,action_budget=1)
+        self.assertEqual(result.status,Status.PENDING)
+        result=self.certifier.certify(world,'A',(('ref','input.x'),),10000,action_budget=8)
+        self.assertEqual(result.status,Status.VERIFIED)
+        self.assertTrue(result.identification.family_hash)
+        self.assertLessEqual(len(result.identification.experiment),8)
+
+    def test_restricted_track_cannot_smuggle_unregistered_primitive(self):
+        world=self.world(('max',('ref','input.x'),('ref','previous')))
+        result=self.certifier.certify(world,'A',(('lit',0),),10000)
+        self.assertEqual(result.status,Status.INVALID)
+        self.assertIn('unregistered',result.reason)

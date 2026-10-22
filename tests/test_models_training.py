@@ -95,3 +95,28 @@ class ModelTrainingTests(unittest.TestCase):
             self.assertEqual(result['usage']['model_tokens'],30)
             self.assertEqual(len([x for k,x in read_verified(out) if k=='runtime_model_events']),3)
             self.assertTrue(replay(out,StringTransitionAdapter())['verified'])
+
+    def test_model_meta_code_changes_candidate_behavior_on_real_train_evidence(self):
+        from dataclasses import replace
+        from beyond_discovery.adapters.transition import StringTransitionAdapter
+        from beyond_discovery.core.controller import RunConfig
+        from beyond_discovery.core.meta import meta_artifact
+        from beyond_discovery.core.interaction import episode
+        from beyond_discovery.runtime.llm import Completion
+        adapter=StringTransitionAdapter()
+        grammar=adapter.public_context()['grammar']
+        class Client:
+            model='fixture'
+            def __init__(self): self.ledger=TokenLedger(10000); self.calls=[]
+            def __call__(self,prompt,limit):
+                result=Completion(json.dumps([{'grammar':{**grammar,'max_nodes':1}},{'grammar':grammar}]),self.model,1,1)
+                self.calls.append({'request':prompt,'response':result.__dict__})
+                return result
+        runtime=ModelResearchRuntime(adapter.public_context(),{r:Client() for r in ('scientist','challenger')})
+        c,s=runtime.initial_pair(RunConfig(base_model='fixture',candidate_limit=2))
+        train=tuple(episode(adapter,t,s,c,0,runtime=runtime) for t in adapter.sample('train',0))
+        good=runtime.candidates(s,None,train,adapter.public_context(),2,'full')
+        reverse_meta=replace(s.meta,program=meta_artifact(('ref','errors'),runtime.provenance(s)))
+        bad=runtime.candidates(replace(s,meta=reverse_meta),None,train,adapter.public_context(),2,'full')
+        self.assertEqual(runtime.grammar(good[0][0]).max_nodes,3)
+        self.assertEqual(runtime.grammar(bad[0][0]).max_nodes,1)
