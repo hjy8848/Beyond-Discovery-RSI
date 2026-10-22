@@ -29,6 +29,7 @@ class RunConfig:
     mode: str = "full"
     base_model: str = "bounded-enumerator-v1"
     max_model_tokens: int = 100000
+    max_training_steps: int = 1000
     gate: GateConfig = GateConfig()
     required_world_tracks: tuple = ("A", "B")
 
@@ -37,7 +38,7 @@ class RunConfig:
             raise ValueError("generation/candidate bounds")
         if type(self.action_budget) is not int or self.action_budget < 1 or type(self.search_budget) is not int or self.search_budget < 1:
             raise ValueError("execution budget bounds")
-        if min(self.max_experiments, self.max_predictions, self.max_search, self.max_verification_outputs, self.stagnation_patience, self.max_model_tokens) < 1:
+        if min(self.max_experiments, self.max_predictions, self.max_search, self.max_verification_outputs, self.stagnation_patience, self.max_model_tokens, self.max_training_steps) < 1:
             raise ValueError("invalid stop budget")
         if self.mode not in ("full", "fixed", "program_evolution", "no_restructuring", "no_meta"):
             raise ValueError("unsupported baseline/ablation")
@@ -65,6 +66,12 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
     runtime = runtime or resolve_runtime(adapter)
     negotiated = negotiate(caps, runtime.languages, config.action_budget, config.required_world_tracks)
     runtime.validate_mode(config.mode)
+    if getattr(runtime,"total_model_tokens",0)>config.max_model_tokens:
+        raise ValueError("model ledger already exceeds preregistered budget")
+    for client in getattr(runtime,"clients",{}).values():
+        if client.ledger.limit>config.max_model_tokens: raise ValueError("model ledger exceeds controller cap")
+    if getattr(runtime,"training_config",None) and runtime.training_config['max_steps']>config.max_training_steps:
+        raise ValueError("training backend budget exceeds controller cap")
     challenger, scientist = runtime.initial_pair(config)
     public_context = runtime.context(adapter)
     # Freeze configuration, exact task membership and implementation before runs.
@@ -87,6 +94,35 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
     method_signatures = set()
     stale = 0
 
+    runtime_cost = Usage()
+    event_offsets = {"events": 0, "model_events": 0}
+
+    def flush_runtime():
+        nonlocal usage, runtime_cost
+        current = Usage(search=getattr(runtime,"total_search",0),
+                        model_tokens=getattr(runtime,"total_model_tokens",0),
+                        training_steps=getattr(runtime,"total_training_steps",0))
+        delta = Usage(*(getattr(current,n)-getattr(runtime_cost,n) for n in current.__dataclass_fields__))
+        usage = usage + delta
+        runtime_cost = current
+        for name in event_offsets:
+            events=getattr(runtime,name,())
+            for event in events[event_offsets[name]:]: archive.append("runtime_"+name,event)
+            event_offsets[name]=len(events)
+        if usage.search>config.max_search or usage.model_tokens>config.max_model_tokens or usage.training_steps>config.max_training_steps:
+            raise BudgetStop("generation resource budget exhausted")
+
+    def generate(call):
+        try: return call()
+        except Exception as exc:
+            archive.append("generation_failure",{"error_type":type(exc).__name__})
+            raise
+        finally: flush_runtime()
+
+    def reserve_search(amount):
+        if usage.search+getattr(runtime,"total_search",0)-runtime_cost.search+amount>config.max_search: raise BudgetStop("generation search budget exhausted")
+    runtime.reserve_search=reserve_search
+
     def evaluate(tasks, s, c, generation, label):
         nonlocal usage
         if digest(adapter.describe()) != negotiated.capabilities_hash:
@@ -96,7 +132,7 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
         one = adapter.estimate_episode(budget, config.search_budget)
         reserve = Usage(*(getattr(one, name) * len(tasks) for name in one.__dataclass_fields__))
         limit = Usage(config.max_experiments, config.max_predictions, config.max_search,
-                      config.max_model_tokens, 0, config.max_verification_outputs)
+                      config.max_model_tokens, config.max_training_steps, config.max_verification_outputs)
         if not usage_within(usage + reserve, limit):
             archive.append("budget_stop", {"usage": usage, "reservation": reserve, "label": label})
             raise BudgetStop("preregistered execution budget exhausted")
@@ -110,11 +146,11 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
             # Save these parents; no assignment below can change frozen opponents.
             c_parent, s_parent = challenger, scientist
             training = evaluate(train, s_parent, c_parent, generation, "train")
-            proposal = runtime.propose(public_context, c_parent, s_parent, training, generation)
+            proposal = generate(lambda: runtime.propose(public_context, c_parent, s_parent, training, generation))
             if proposal is not None:
                 reserved = adapter.estimate_certification()
                 limit = Usage(config.max_experiments, config.max_predictions, config.max_search,
-                              config.max_model_tokens, 0, config.max_verification_outputs)
+                              config.max_model_tokens, config.max_training_steps, config.max_verification_outputs)
                 if not usage_within(usage + reserved, limit):
                     raise BudgetStop("world certification budget exhausted")
                 before = adapter.meter()
@@ -132,11 +168,11 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
             elif config.required_world_tracks and not getattr(runtime,"supports_world_creation",False):
                 raise CapabilityUnsupported("runtime did not implement required world creation")
             else:
-                archive.append("scope_limitation", {"feature": "world-creation", "status": "CAPABILITY_UNSUPPORTED"})
+                archive.append("world_search_exhausted", {"feature": "world-creation", "status": "NO_VALID_PROPOSAL"})
             diagnosis = diagnose(s_parent.meta, training)
             if proposer is None:
-                c_attempts = runtime.candidates(c_parent, diagnosis, training, public_context, config.candidate_limit, config.mode)
-                s_attempts = runtime.candidates(s_parent, diagnosis, training, public_context, config.candidate_limit, config.mode)
+                c_attempts = generate(lambda: runtime.candidates(c_parent, diagnosis, training, public_context, config.candidate_limit, config.mode))
+                s_attempts = generate(lambda: runtime.candidates(s_parent, diagnosis, training, public_context, config.candidate_limit, config.mode))
             else:
                 before_tokens = proposer.total_tokens
                 before_calls = len(proposer.calls)
@@ -152,6 +188,11 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
                     usage = usage + Usage(model_tokens=proposer.total_tokens - before_tokens)
                 if usage.model_tokens > config.max_model_tokens:
                     raise BudgetStop("reported model-token budget exceeded; no candidate selected")
+            if hasattr(runtime,"trained_candidates"):
+                c_attempts=generate(lambda: runtime.trained_candidates(c_parent,c_attempts,training,
+                    lambda child: evaluate(train,s_parent,child,generation,"train-model-reward-c"), Path(out)/"checkpoints"))
+                s_attempts=generate(lambda: runtime.trained_candidates(s_parent,s_attempts,training,
+                    lambda child: evaluate(train,child,c_parent,generation,"train-model-reward-s"), Path(out)/"checkpoints"))
             # Stage barrier: both candidate lists persisted before any private dev.
             archive.append("candidate_barrier", {"generation": generation, "parents": (c_parent, s_parent),
                                                   "diagnosis": diagnosis, "challenger": c_attempts, "scientist": s_attempts})
@@ -181,8 +222,8 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
                     # and adaptation budget fixed. Compare inventions it produces.
                     meta_gate = None
                     if child.meta != parent.meta and (gate.decision == Decision.ACCEPT or getattr(runtime,"separate_meta",False)):
-                        old_adapt, _ = runtime.adapt(parent, diagnosis, public_context, parent.meta)
-                        new_adapt, _ = runtime.adapt(parent, diagnosis, public_context, child.meta)
+                        old_adapt, _ = generate(lambda: runtime.adapt(parent, diagnosis, public_context, parent.meta))
+                        new_adapt, _ = generate(lambda: runtime.adapt(parent, diagnosis, public_context, child.meta))
                         old_e = evaluate(dev, old_adapt if role == "scientist" else s_parent,
                                          old_adapt if role == "challenger" else c_parent, generation, "meta-parent")
                         new_e = evaluate(dev, new_adapt if role == "scientist" else s_parent,
@@ -269,7 +310,7 @@ def run_rsi(adapter, out, config=None, proposer=None, runtime=None):
                "challenger": challenger, "scientist": scientist,
                "protocol": negotiated, "runtime_id": runtime.runtime_id,
                "limitations": list(caps.limitations) + [
-                   "M1 protocol implementation does not complete M2-M7 invention or training",
+                   "H1-H4 require separate preregistered scientific experiments",
                    "bootstrap with few clusters is an engineering gate, not paper-level evidence"]}
     archive.append("summary", summary)
     archive.marker("summary.json", summary)

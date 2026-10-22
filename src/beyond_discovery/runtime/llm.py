@@ -21,6 +21,10 @@ class Completion:
     input_tokens: int
     output_tokens: int
     truncated: bool = False
+    behavior_logprob: float = None
+    policy_id: str = None
+    prompt_ids: tuple = ()
+    completion_ids: tuple = ()
 
 
 class JSONPolicyProposer:

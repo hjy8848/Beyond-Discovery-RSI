@@ -34,6 +34,10 @@ class SynthesisRuntime:
         self.events=[]
         self.total_search=0
 
+    def charge_search(self,amount):
+        if hasattr(self,"reserve_search"): self.reserve_search(amount)
+        self.total_search+=amount
+
     def context(self,adapter):
         self.public=JSONValue.of(adapter.public_context()).value
         return self.public
@@ -136,7 +140,7 @@ class SynthesisRuntime:
         provenance=self.provenance(challenger,role="challenger")
         actions=tuple(Action.create(a["operation"],a["arguments"]) for a in public_context["actions"])
         try:
-            self.total_search+=self.search_budget
+            self.charge_search(self.search_budget)
             models=self._rank_models(self.models(training),training,challenger.meta)[:4]
             return ChallengerInventor().propose(grammar,actions,public_context["initial"],models,training,
                                                 provenance,scientist.content_hash,self.search_budget,
@@ -164,6 +168,7 @@ class SynthesisRuntime:
         if mode=="fixed": return ()
         self.public=public_context
         grammar=self.grammar(parent)
+        self.charge_search(self.search_budget)
         enumeration=enumerate_programs(grammar,self.search_budget)
         parent_programs=tuple(p for p in enumeration.programs if typecheck(p,dict(grammar.variables))==grammar.output_type)
         actions=tuple(Action.create(a["operation"],a["arguments"]) for a in public_context["actions"])
@@ -179,7 +184,7 @@ class SynthesisRuntime:
                 if mode=="reflection" and operator!="RECOMBINE": continue
                 for e in training:
                     if mode not in ("program_evolution","no_diagnosis","reflection") and not any(c.kind==BoundaryKind.SPACE_REFUTED for c in e.boundary_certificates): continue
-                    self.total_search+=self.search_budget
+                    self.charge_search(self.search_budget)
                     assets=tuple((expression_from(x.new_claim.program),grammar.variables,(digest(x),)) for x in training if x.score.valid and x.score.value==1.0)
                     pool.extend(engine.invent(operator,parent_programs,self.examples(e),provenance,assets))
             if meta.program is not None:
@@ -204,12 +209,13 @@ class SynthesisRuntime:
             expanded=replace(grammar,max_nodes=min(7,grammar.max_nodes+2))
             for e in training:
                 fitted,_=fit(expanded,self.examples(e),self.search_budget)
-                self.total_search+=self.search_budget
+                self.charge_search(self.search_budget)
                 if fitted and fitted[0] not in alternatives: alternatives.append(fitted[0])
             hypotheses=tuple(dict.fromkeys(old_models+tuple(alternatives)))
             if parent.role=="challenger" and meta.program is not None:
                 hypotheses=self._rank_models(hypotheses,training,meta)[:4]
             if len(hypotheses)>1:
+                self.charge_search(self.search_budget)
                 experiment=design_experiment(hypotheses,actions,public_context["initial"],min(4,parent.experiment.action_budget),self.search_budget,provenance)
                 before=tuple(a.source for a in parent.artifacts if a.kind=="experiment")
                 if experiment.source not in before:
@@ -231,6 +237,7 @@ class SynthesisRuntime:
         for e in training:
             facts.append({"errors":len(e.boundaries),"complexity":node_size(expression_from(e.new_claim.program)),
                           "cost":e.usage.search,"novelty":0,"coverage":1})
+        self.charge_search(min(128,self.search_budget))
         programs=synthesize_meta(parent.meta.program,tuple(facts),self.provenance(parent),min(128,self.search_budget))
         if not programs: return attempts
         return tuple((replace(child,meta=replace(parent.meta,program=programs[i%len(programs)],revision=parent.meta.revision+1)),patch)
