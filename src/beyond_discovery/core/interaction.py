@@ -40,7 +40,8 @@ def rows(evidence, role):
             key = (e.task.source_cluster, e.behavior_hash)
             novel = key not in seen
             seen.add(key)
-            value = float(novel and any(b.reproduced for b in e.boundaries)) / max(1, e.usage.experiments)
+            certified = any(getattr(c.kind,"value",c.kind)=="SPACE_REFUTED" for c in e.boundary_certificates)
+            value = float(novel and certified and any(b.reproduced for b in e.boundaries)) / max(1, e.usage.experiments)
         allocated_cost = allocation_cost(e)
         result.append((e.task.source_cluster, value, e.score.valid and e.failure is None, allocated_cost, e.task.task_id))
     return tuple(result)
@@ -62,6 +63,7 @@ def invention_rows(frozen, adapted, role):
             success = old.score.value < 1.0 and new.score.value == 1.0 and old.behavior_hash != new.behavior_hash
         else:
             success = (old.observations != new.observations and bool(new.boundaries)
+                       and any(getattr(c.kind,"value",c.kind)=="SPACE_REFUTED" for c in new.boundary_certificates)
                        and all(b.reproduced for b in new.boundaries)
                        and not old.boundaries)
         result.append((new.task.source_cluster, float(success), new.score.valid,

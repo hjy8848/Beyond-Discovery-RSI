@@ -148,6 +148,7 @@ class EvidenceBundle:
     usage: Usage
     failure: Optional[str] = None
     allocation: Optional[Usage] = None
+    boundary_certificates: tuple = ()
 
     def agent_view(self) -> dict:
         if self.task.split != "train":
@@ -172,6 +173,7 @@ class MetaPolicy:
     required_stagnation: int = 2
     search_order: str = "forward"
     revision: int = 0
+    program: Any = None
 
 
 @dataclass(frozen=True)

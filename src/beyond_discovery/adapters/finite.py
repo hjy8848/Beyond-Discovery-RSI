@@ -69,8 +69,8 @@ class FiniteAdapter:
             limitations=("retained finite baseline; track B is bounded expression DSL",))
 
     def estimate_episode(self, action_budget, search_budget):
-        return Usage(experiments=2 * action_budget, predictions=4 * len(self.inputs),
-                     search=search_budget, verification_outputs=2 * len(self.inputs) + 4 * action_budget)
+        return Usage(experiments=2 * action_budget, predictions=4 * len(self.inputs) + search_budget * action_budget,
+                     search=search_budget, verification_outputs=4 * len(self.inputs) + 6 * action_budget)
 
     def estimate_certification(self):
         return Usage(verification_outputs=self.certification_budget())

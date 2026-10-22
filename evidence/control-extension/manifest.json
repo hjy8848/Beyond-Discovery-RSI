@@ -1,0 +1,15 @@
+{
+  "implementation_hash": "0b432f60003bc99262df4293a1b3c07497d0ecb7971d0346d671de8f0cd0ac7d",
+  "historical_baseline_commit": "3ccda3f",
+  "tests": {
+    "passed": 90,
+    "seconds": 51.678
+  },
+  "new_control_tests": 11,
+  "scientific_status": "H1-H4 UNVERIFIED; arbitrary open-ended invention NOT_IMPLEMENTED",
+  "files": {
+    "demo-report.json": "07dff544ac444624a67861d5c3508bf183f0c98fe2c2ed348fd8c4b53d36e980",
+    "tests.log": "98c4565c6d515e5e5f13ae91865788a9ba085d040f8e8d9d20e56aece117dcf5",
+    "runs.tar.gz": "d3a58516e48651682ecf9db5cf5dccfd449c853592119276604e179a471cbb70"
+  }
+}

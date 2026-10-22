@@ -1,0 +1,90 @@
+{
+  "implementation_hash": "26b849fe8fd64da09a93af564b2e25e62b48062b7fd191f1ec5112f30d584897",
+  "domains": {
+    "stateful-scm": {
+      "status": "COMPLETE",
+      "test_score": 0.532986111111111,
+      "usage": {
+        "experiments": 2087,
+        "predictions": 367952,
+        "search": 67967,
+        "model_tokens": 0,
+        "training_steps": 0,
+        "verification_outputs": 49407
+      },
+      "elapsed_seconds_including_replay": 25.653309709000002,
+      "replay": {
+        "verified": true,
+        "episodes_reexecuted": 211,
+        "records": 226,
+        "note": "model responses are archived; no claim of stochastic API regeneration"
+      },
+      "world_statuses": [
+        "VERIFIED",
+        "INVALID"
+      ],
+      "task_decisions": [
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "INCONCLUSIVE"
+      ],
+      "meta_decisions": [
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "INCONCLUSIVE"
+      ],
+      "meta_rollbacks": 6,
+      "journal_sha256": "059a3df7e6f01acc45c07a806b77f2fdef294c7bd4bdfba03fbde204461efd69",
+      "summary_hash": "6d717b25eb8a0759c758da18074e008d7cc7d58116ba35cf88591c239a669f52"
+    },
+    "string-transducer": {
+      "status": "COMPLETE",
+      "test_score": 0.3819444444444444,
+      "usage": {
+        "experiments": 1235,
+        "predictions": 154400,
+        "search": 54652,
+        "model_tokens": 0,
+        "training_steps": 0,
+        "verification_outputs": 29788
+      },
+      "elapsed_seconds_including_replay": 12.615911292,
+      "replay": {
+        "verified": true,
+        "episodes_reexecuted": 136,
+        "records": 151,
+        "note": "model responses are archived; no claim of stochastic API regeneration"
+      },
+      "world_statuses": [
+        "VERIFIED",
+        "INVALID"
+      ],
+      "task_decisions": [
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "ACCEPT"
+      ],
+      "meta_decisions": [
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "INCONCLUSIVE",
+        "ACCEPT",
+        "ACCEPT"
+      ],
+      "meta_rollbacks": 4,
+      "journal_sha256": "5a096b39fafe0b2d799747a63e7e3b07ad0aa872155c2f255dbc46d46e9aebe1",
+      "summary_hash": "5ed228ea062919216554f9deabc334dce3ca2fcefb57781098cdd689639f7cae"
+    }
+  },
+  "scientific_claims": "H1-H4 unverified"
+}

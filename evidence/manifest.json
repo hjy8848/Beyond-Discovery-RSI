@@ -1,0 +1,19 @@
+{
+  "implementation_hash": "26b849fe8fd64da09a93af564b2e25e62b48062b7fd191f1ec5112f30d584897",
+  "python": "3.9.6",
+  "platform": "macOS",
+  "tests": {
+    "passed": 79,
+    "seconds": 55.073
+  },
+  "model_inference": "NOT_RUN",
+  "neural_training": "NOT_RUN",
+  "external_benchmarks": "NOT_RUN",
+  "scientific_hypotheses": "H1-H4 UNVERIFIED",
+  "files": {
+    "local-evidence-20261023.tar.gz": "e4bc98ed69981e916fc638b64353847ce5e4d9465b2877c959bab93674fc40ab",
+    "string-controls.json": "eef7b74bb64d00095c60ca902594e0bd9b9f83102d8d72e36761f1f218039aed",
+    "demo-report.json": "b777b9a45109d4b8dba2f6f8e8fc4d0a3b4070b679ddead9f3ef793e8e6eed07",
+    "scm-controls.json": "123e644c16f18e7c89c87ac0e26e881e3410d81d40b06764e837a4cb50b7b713"
+  }
+}

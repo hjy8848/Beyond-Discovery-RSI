@@ -11,14 +11,28 @@ from ..runtime.policy_runtime import freeze
 
 
 def snapshot_from(data):
-    return Snapshot(data["role"], ModelState(**data["model"]),
-                    MetaPolicy(**{**data["meta"], "operators": tuple(data["meta"]["operators"])}),
+    state=ModelState(**data["model"])
+    if state.delta_checkpoint:
+        from ..runtime.models import validate_checkpoint
+        manifest=validate_checkpoint(state.delta_checkpoint,state.role,state.base_model)
+        if manifest['training_data_hash']!=state.training_data_hash: raise ValueError('checkpoint provenance changed')
+    meta_data = {**data["meta"], "operators": tuple(data["meta"]["operators"])}
+    if isinstance(meta_data.get("program"), dict): meta_data["program"] = artifact_from(meta_data["program"])
+    return Snapshot(data["role"], state,
+                    MetaPolicy(**meta_data),
                     tuple(data["representation"]), ExperimentProgram(**data["experiment"]),
                     data["generation"], data["parent_hash"], tuple(data["knowledge"]),
                     tuple(artifact_from(a) for a in data.get("artifacts", ())))
 
 
 def replay(path, adapter):
+    from ..runtime.sandbox import ResearchSandbox
+    if "research-expression-v1" in adapter.describe().artifact_languages:
+        with ResearchSandbox(): return _replay(path,adapter)
+    return _replay(path,adapter)
+
+
+def _replay(path, adapter):
     from .contracts import TaskRef
     from .controller import implementation_hash
     records = read_verified(path)
@@ -47,7 +61,8 @@ def replay(path, adapter):
                 program = artifact_from(program)
             else:
                 program = freeze(program)
-            result = adapter.compile_challenge(ChallengeProposal(proposal["domain_id"], program, proposal["track"]))
+            result = adapter.compile_challenge(ChallengeProposal(proposal["domain_id"], program, proposal["track"]),
+                                               **({"action_budget":prereg["config"]["action_budget"]} if "world-budget-certification" in adapter.describe().features else {}))
             if plain(result) != data["certification"]:
                 raise ValueError("world certification replay mismatch")
         elif kind == "freeze":

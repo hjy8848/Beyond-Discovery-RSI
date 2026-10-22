@@ -18,11 +18,12 @@ def diagnose(meta, evidence):
         raise PermissionError("diagnosis accepts train only")
     valid = [e for e in evidence if e.failure is None and e.score.valid]
     failures = {e.task.source_cluster for e in valid if e.score.value < 1.0}
-    conflicts = {e.task.source_cluster for e in valid if any(b.reproduced for b in e.boundaries)}
+    from .boundary import BoundaryKind
+    certified = [e for e in valid if any(c.kind == BoundaryKind.SPACE_REFUTED for c in e.boundary_certificates)]
+    conflicts = {e.task.source_cluster for e in certified}
     shared = {}
-    for e in valid:
-        if e.boundaries:
-            shared.setdefault(e.old_claim.assumption, set()).add(e.task.source_cluster)
+    for e in certified:
+        shared.setdefault(e.old_claim.assumption, set()).add(e.task.source_cluster)
     assumptions = tuple(k for k, clusters in shared.items() if len(clusters) >= meta.required_conflicts)
     enough = len(conflicts) >= meta.required_conflicts and len(failures) >= meta.required_stagnation and bool(assumptions)
     action = "propose_restructure" if enough else ("continue_local_search" if valid else "insufficient_evidence")
