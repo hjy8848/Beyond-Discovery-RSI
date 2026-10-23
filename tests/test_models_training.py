@@ -32,6 +32,15 @@ class ModelTrainingTests(unittest.TestCase):
         ledger.settle(8,5); self.assertEqual(ledger.used,5)
         with self.assertRaises(ProtocolError): ledger.settle(2,3)
 
+    def test_unlimited_ledger_accounts_actual_tokens_without_aggregate_stop(self):
+        ledger=TokenLedger(None)
+        first=ledger.reserve(10**7)
+        second=ledger.reserve(10**7)
+        ledger.settle(first,9_000_000)
+        ledger.record_overrun(second,11_000_000)
+        self.assertIsNone(ledger.limit)
+        self.assertEqual(ledger.used,20_000_000)
+
     def test_actual_http_protocol_usage_truncation_and_no_secret_log(self):
         class Handler(BaseHTTPRequestHandler):
             def log_message(self,*args): pass

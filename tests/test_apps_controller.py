@@ -10,6 +10,24 @@ from beyond_discovery.core.archive import read_verified
 from beyond_discovery.core.conformance import check_conformance
 
 class ControllerTests(unittest.TestCase):
+    def test_no_aggregate_model_token_cap_preserves_actual_accounting(self):
+        from beyond_discovery.runtime.models import TokenLedger
+        with tempfile.TemporaryDirectory() as root:
+            limits=CodingLimits(2,256,64);store=fixture_store(root);ledger=TokenLedger(None)
+            a=APPSAdapter(store,ProtocolJudge(),limits.tokens,task_limit=1,testing=True)
+            client=ScriptedModel(['def add(a,b): return a+b']*200,ledger=ledger)
+            r=CodingResearchRuntime({'scientist':client,'challenger':ScriptedModel([],ledger=ledger)},limits,method='self-repair',testing=True)
+            out=Path(root)/'unbounded-run'
+            cfg=RunConfig(generations=1,base_model=client.model,required_world_tracks=('A',),
+                final_evaluation=False,max_model_tokens=None)
+            result=run_rsi(a,out,cfg,runtime=r)
+            self.assertEqual(result['status'],'SMOKE_COMPLETE')
+            self.assertIsNone(result['test_score'])
+            self.assertIsNone(cfg.max_model_tokens)
+            self.assertGreater(result['usage']['model_tokens'],0)
+            self.assertEqual(result['usage']['model_tokens'],ledger.used)
+            self.assertIsNone(ledger.limit)
+
     def test_direct_controller_cannot_open_official_test(self):
         from beyond_discovery.core.protocol import ProtocolError
         with tempfile.TemporaryDirectory() as root:

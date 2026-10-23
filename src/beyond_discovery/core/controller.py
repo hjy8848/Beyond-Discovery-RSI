@@ -28,7 +28,7 @@ class RunConfig:
     seed: int = 42
     mode: str = "full"
     base_model: str = "bounded-enumerator-v1"
-    max_model_tokens: int = 100000
+    max_model_tokens: int | None = 100000
     max_training_steps: int = 1000
     gate: GateConfig = GateConfig()
     required_world_tracks: tuple = ("A", "B")
@@ -39,7 +39,10 @@ class RunConfig:
             raise ValueError("generation/candidate bounds")
         if type(self.action_budget) is not int or self.action_budget < 1 or type(self.search_budget) is not int or self.search_budget < 1:
             raise ValueError("execution budget bounds")
-        if min(self.max_experiments, self.max_predictions, self.max_search, self.max_verification_outputs, self.stagnation_patience, self.max_model_tokens, self.max_training_steps) < 1:
+        bounded = (self.max_experiments, self.max_predictions, self.max_search,
+                   self.max_verification_outputs, self.stagnation_patience, self.max_training_steps)
+        if min(bounded) < 1 or (self.max_model_tokens is not None and
+                                (type(self.max_model_tokens) is not int or self.max_model_tokens < 1)):
             raise ValueError("invalid stop budget")
         if self.mode not in ("full", "fixed", "fixed_challenger", "program_evolution", "no_restructuring", "no_meta", "no_diagnosis", "no_falsification", "reflection", "random_challenger", "hardness_first"):
             raise ValueError("unsupported baseline/ablation")
@@ -78,10 +81,12 @@ def _run_rsi(adapter, out, config=None, proposer=None, runtime=None):
     runtime = runtime or resolve_runtime(adapter)
     negotiated = negotiate(caps, runtime.languages, config.action_budget, config.required_world_tracks)
     runtime.validate_mode(config.mode)
-    if getattr(runtime,"total_model_tokens",0)>config.max_model_tokens:
+    if config.max_model_tokens is not None and getattr(runtime,"total_model_tokens",0)>config.max_model_tokens:
         raise ValueError("model ledger already exceeds preregistered budget")
     for client in getattr(runtime,"clients",{}).values():
-        if client.ledger.limit>config.max_model_tokens: raise ValueError("model ledger exceeds controller cap")
+        if (config.max_model_tokens is not None and client.ledger.limit is not None and
+                client.ledger.limit>config.max_model_tokens):
+            raise ValueError("model ledger exceeds controller cap")
     if getattr(runtime,"training_config",None) and runtime.training_config['max_steps']>config.max_training_steps:
         raise ValueError("training backend budget exceeds controller cap")
     challenger, scientist = runtime.initial_pair(config)
@@ -125,7 +130,9 @@ def _run_rsi(adapter, out, config=None, proposer=None, runtime=None):
             events=getattr(adapter if name=="judge_events" else runtime,name,())
             for event in events[event_offsets[name]:]: archive.append("runtime_"+name,event)
             event_offsets[name]=len(events)
-        if usage.search>config.max_search or usage.model_tokens>config.max_model_tokens or usage.training_steps>config.max_training_steps:
+        if (usage.search>config.max_search or
+                (config.max_model_tokens is not None and usage.model_tokens>config.max_model_tokens) or
+                usage.training_steps>config.max_training_steps):
             raise BudgetStop("generation resource budget exhausted")
 
     def charge_prediction():
@@ -235,7 +242,7 @@ def _run_rsi(adapter, out, config=None, proposer=None, runtime=None):
                     for call in proposer.calls[before_calls:]:
                         archive.append("model_call", call)
                     usage = usage + Usage(model_tokens=proposer.total_tokens - before_tokens)
-                if usage.model_tokens > config.max_model_tokens:
+                if config.max_model_tokens is not None and usage.model_tokens > config.max_model_tokens:
                     raise BudgetStop("reported model-token budget exceeded; no candidate selected")
             if hasattr(runtime,"trained_candidates"):
                 c_attempts=generate(lambda: runtime.trained_candidates(c_parent,c_attempts,training,

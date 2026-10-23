@@ -17,7 +17,7 @@ from ..core.protocol import CapabilityUnsupported, ProtocolError
 class TokenLedger:
     """Reserve before network/compute; ambiguous failures consume the reservation."""
     def __init__(self, limit):
-        if type(limit) is not int or limit < 1: raise ValueError("token limit")
+        if limit is not None and (type(limit) is not int or limit < 1): raise ValueError("token limit")
         self.limit, self.used = limit, 0
         self.lock = threading.Lock()
         self.pending = {}
@@ -25,7 +25,7 @@ class TokenLedger:
     def reserve(self, amount):
         if type(amount) is not int or amount < 1: raise ValueError("token reservation")
         with self.lock:
-            if self.used + amount > self.limit: raise ProtocolError("MODEL_TOKEN_BUDGET_EXHAUSTED")
+            if self.limit is not None and self.used + amount > self.limit: raise ProtocolError("MODEL_TOKEN_BUDGET_EXHAUSTED")
             self.used += amount
             self.pending[amount]=self.pending.get(amount,0)+1
         return amount

@@ -167,8 +167,10 @@ MIT evaluator 源码语义判定，隐藏输入和期望答案不会发送给提
 
 真实模型模式必须提供模型精确版本 ID、两个角色的 HTTP/HF 客户端和真实凭据/本地权重。HTTP
 要求服务返回与请求版本完全匹配的模型 ID 和 token 用量。`CodingLimits` 同时限制 Scientist、
-Challenger 的调用数、输入上界、输出上界；摘要统计推理真实用量和每次 Judge 执行成本。默认使用
-同一 32,768 输入 token 上界及 2,048 输出 token 上界；较长问题或研究日志应显式提高上界和总预算。
+Challenger 的调用数、输入上界、单次输出上界；摘要统计推理真实用量和每次 Judge 执行成本。默认使用
+同一 32,768 输入 token 上界及 2,048 输出 token 上界，单次输出最多可设为 32,768（还须满足
+模型上下文长度）。APPS CLI 可传 `--max-model-tokens unlimited` 关闭累计 Token 停止条件；账本仍记录
+实际用量。调用数、单次上下文长度和 Judge 容器执行限制独立于累计 Token 上限，并继续生效。
 
 ```sh
 PYTHONPATH=src python3 -m beyond_discovery.benchmarks.apps.cli check \

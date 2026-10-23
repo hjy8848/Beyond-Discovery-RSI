@@ -79,6 +79,16 @@ def runtime(args,limits,method):
     return CodingResearchRuntime(clients,limits,method)
 
 
+def optional_token_limit(value):
+    """Parse a finite token cap or the explicit no-aggregate-cap setting."""
+    if value is None or value.strip().lower() in ('unlimited','none','no-limit'):
+        return None
+    try: result=int(value)
+    except (TypeError,ValueError) as exc: raise argparse.ArgumentTypeError('expected a positive integer or unlimited') from exc
+    if result<1: raise argparse.ArgumentTypeError('token cap must be positive or unlimited')
+    return result
+
+
 def audit_report(out,summary):
     records=read_verified(out);episodes=[data['evidence'] for kind,data in records if kind=='episode']
     valid={(e['task']['task_id'],c['program_hash'],c['witness_hash']) for e in episodes for c in e['boundary_certificates'] if c['kind']=='SOLUTION_REFUTED'}
@@ -122,7 +132,8 @@ def execute_train_only_smoke(args,out):
         max_experiments=args.max_judge_launches,max_verification_outputs=args.max_judge_cases,
         required_world_tracks=('A',),final_evaluation=False)
     config.validate();r.validate_mode(config.mode)
-    if r.total_model_tokens>config.max_model_tokens or any(c.ledger.limit>config.max_model_tokens for c in r.clients.values()):
+    if config.max_model_tokens is not None and (r.total_model_tokens>config.max_model_tokens or
+            any(c.ledger.limit is not None and c.ledger.limit>config.max_model_tokens for c in r.clients.values())):
         raise ProtocolError('model token ledger exceeds train-only smoke budget')
     negotiated=negotiate(a.describe(),r.languages,config.action_budget,config.required_world_tracks)
     reservation=a.estimate_episode(config.action_budget,config.search_budget)
@@ -200,7 +211,9 @@ def parser():
     p.add_argument('--task-id',help='explicit locked task id for the dev-isolated train-only smoke')
     p.add_argument('--device',default='cpu');p.add_argument('--prompt-token-bound',type=int,default=32768)
     p.add_argument('--output-tokens',type=int,default=2048);p.add_argument('--model-calls',type=int,default=2)
-    p.add_argument('--max-model-tokens',type=int,default=2000000);p.add_argument('--max-judge-launches',type=int,default=100000);p.add_argument('--max-judge-cases',type=int,default=10000000)
+    p.add_argument('--max-model-tokens',type=optional_token_limit,default=2000000,
+                   help='aggregate model token cap; use unlimited for accounting without a total token stop')
+    p.add_argument('--max-judge-launches',type=int,default=100000);p.add_argument('--max-judge-cases',type=int,default=10000000)
     p.add_argument('--task-limit',type=int,default=4);p.add_argument('--generations',type=int,default=1);p.add_argument('--candidates',type=int,default=1)
     p.add_argument('--action-budget',type=int,default=8);p.add_argument('--seed',type=int,default=42)
     p.add_argument('--method',choices=METHODS,default='evolved-meta-rsi');p.add_argument('--verify-replay',action='store_true')

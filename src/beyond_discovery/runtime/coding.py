@@ -23,7 +23,7 @@ class CodingLimits:
     output_tokens: int=2048
     effects: int=32
     def __post_init__(self):
-        if not 1<=self.model_calls<=8 or not 128<=self.input_tokens<=100000 or not 32<=self.output_tokens<=16384 or not 1<=self.effects<=64:
+        if not 1<=self.model_calls<=8 or not 128<=self.input_tokens<=100000 or not 32<=self.output_tokens<=32768 or not 1<=self.effects<=64:
             raise ValueError('coding episode limits')
     @property
     def tokens(self):return 2*self.model_calls*(self.input_tokens+self.output_tokens)

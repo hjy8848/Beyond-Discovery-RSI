@@ -1,8 +1,8 @@
-import json
+import argparse,json
 import unittest
 from types import SimpleNamespace
 
-from beyond_discovery.benchmarks.apps.cli import audit_self_repair
+from beyond_discovery.benchmarks.apps.cli import audit_self_repair,optional_token_limit
 from beyond_discovery.core.protocol import ProtocolError
 
 
@@ -21,6 +21,13 @@ def record(prompt):
 
 
 class APPSCLITests(unittest.TestCase):
+    def test_unlimited_model_token_option_is_explicit_and_rejects_invalid_caps(self):
+        self.assertIsNone(optional_token_limit('unlimited'))
+        self.assertIsNone(optional_token_limit('none'))
+        self.assertEqual(optional_token_limit('4096'),4096)
+        with self.assertRaises(argparse.ArgumentTypeError):optional_token_limit('0')
+        with self.assertRaises(argparse.ArgumentTypeError):optional_token_limit('lots')
+
     def setUp(self):
         self.observations=[observation(1,False),observation(2,True)]
         self.trace=[

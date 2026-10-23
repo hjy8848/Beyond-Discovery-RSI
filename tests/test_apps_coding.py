@@ -8,6 +8,11 @@ from beyond_discovery.core.contracts import plain
 from beyond_discovery.core.protocol import CapabilityUnsupported,ProtocolError
 
 class CodingTests(unittest.TestCase):
+    def test_model_context_bound_can_use_full_reported_gateway_window(self):
+        limits=CodingLimits(2,32768,32768)
+        self.assertEqual(limits.tokens,262144)
+        with self.assertRaises(ValueError):CodingLimits(2,32768,32769)
+
     def setup_runtime(self,root,texts,method='self-repair'):
         limits=CodingLimits(2,256,64)
         adapter=APPSAdapter(fixture_store(root),ProtocolJudge(),limits.tokens,testing=True)
