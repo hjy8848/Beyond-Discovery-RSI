@@ -171,6 +171,7 @@ def _run_rsi(adapter, out, config=None, proposer=None, runtime=None):
         for generation in range(config.generations):
             # Save these parents; no assignment below can change frozen opponents.
             c_parent, s_parent = challenger, scientist
+            if "frozen-challenge-binding" in caps.features:adapter.bind_frozen_scientist(s_parent.content_hash)
             training = evaluate(train, s_parent, c_parent, generation, "train")
             runtime.mode=config.mode
             runtime.seed=config.seed

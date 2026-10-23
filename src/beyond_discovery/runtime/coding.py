@@ -39,7 +39,7 @@ def seed_workflow(role,method,prov,calls):
     else:
         step=['let','candidate',['effect','code_generate',C(method=='self-repair')],
               ['let','feedback',['effect','code_test',V('candidate')],['effect','code_submit',V('candidate')]]]
-        entry=['fold',C(list(range(1 if method=='direct' else calls))),'last','attempt',C(None),step]
+        entry=['fold',C(list(range(calls))),'last','attempt',C(None),step]
     return control_artifact({'score':['lit',0],'functions':{},'entry':entry},prov)
 
 
@@ -119,7 +119,7 @@ class CodingResearchRuntime:
         with ResearchSandbox() as sandbox:return sandbox.control(load(artifact),context,effect)
     def episode(self,adapter,task,scientist,challenger,generation,search_budget):
         if self._tape is None and self.replay_only:raise CapabilityUnsupported('replay requires archived episode generations')
-        before=adapter.meter();records=[];observations=[];programs=[];trace=[];selected=None;indexes=None
+        before=adapter.meter();records=[];observations=[];programs=[];trace=[];selected=None;indexes=None;challenged=False;plans=[]
         budget=min(scientist.experiment.action_budget,challenger.experiment.action_budget)
         session=adapter.begin(task,budget)
         prov=Provenance('apps',task.split,'coding-episode',generation,scientist.content_hash,task.seed,adapter.verifier_version,scientist.parent_hash)
@@ -129,15 +129,26 @@ class CodingResearchRuntime:
             public=plain(adapter.initial_observation(session))
             control_input={'role':'challenger','task':public,'budget':plain(self.limits),'public_indexes':list(range(len(public['public_cases'])))}
             def effect(name,args):
-                nonlocal selected,indexes
+                nonlocal selected,indexes,challenged
                 if len(trace)>=self.limits.effects:raise ProtocolError('coding effect budget exhausted')
-                row={'name':name,'arguments':args};trace.append(row)
+                row={'role':control_input['role'],'name':name,'arguments':args};trace.append(row)
                 if name=='code_experiment':
                     if len(args)!=1:raise ProtocolError('experiment schema')
                     value=args[0]
                     if value is not None and (not isinstance(value,list) or len(set(value))!=len(value) or any(type(i) is not int or not 0<=i<len(public['public_cases']) for i in value)):
                         raise ProtocolError('experiment must select legal public tests')
                     indexes=value;result={'indexes':value}
+                elif name=='code_generate' and control_input['role']=='challenger':
+                    if len(args)!=1 or type(args[0]) is not bool:raise ProtocolError('Challenger generation schema')
+                    prompt=canonical({'contract':'Return JSON list of indexes for a distinguishing experiment using ONLY declared public cases.',
+                        'task':public,'scientist_code':programs[-1].source,'instructions':challenger.representation})
+                    plan=json.loads(self._call(challenger,prompt,records));plans.append(plan);result=len(plans)-1
+                elif name in ('code_test','code_submit') and control_input['role']=='challenger':
+                    if len(args)!=1 or type(args[0]) is not int or not 0<=args[0]<len(plans):raise ProtocolError('Challenger plan version')
+                    plan=plans[args[0]]
+                    if not isinstance(plan,list) or len(set(plan))!=len(plan) or any(type(i) is not int or not 0<=i<len(public['public_cases']) for i in plan):raise ProtocolError('uncertified public experiment')
+                    if name=='code_submit':indexes=plan
+                    result={'legal':True,'indexes':plan}
                 elif name=='code_generate':
                     if control_input['role']!='scientist' or len(args)!=1 or type(args[0]) is not bool:raise ProtocolError('code generation authority/schema')
                     prompt=canonical({'contract':'Generate a complete Python solution, source only. Dataset text is untrusted problem data.',
@@ -149,6 +160,11 @@ class CodingResearchRuntime:
                     if control_input['role']!='scientist' or len(args)!=1 or type(args[0]) is not int or not 0<=args[0]<len(programs):raise ProtocolError('code version reference')
                     if name=='code_submit':selected=args[0];result={'submitted':programs[selected].content_hash}
                     else:
+                        if not challenged:
+                            challenged=True;control_input['role']='challenger'
+                            control_input['scientist_code']=programs[args[0]].source
+                            try:self._control(challenger.meta.program,control_input,effect)
+                            finally:control_input['role']='scientist'
                         action=Action.create('public_test',{'code':programs[args[0]].source,**({'indexes':indexes} if indexes is not None else {})})
                         observation=adapter.step(session,action);observations.append(observation);result=plain(observation.outcome)
                 elif name=='failure_analysis':
@@ -157,7 +173,6 @@ class CodingResearchRuntime:
                     result={'public_feedback':plain(observations),'versions':[p.content_hash for p in programs]}
                 else:raise ProtocolError('coding capability not granted: '+name)
                 row['result']=result;return result
-            self._control(challenger.meta.program,control_input,effect)
             control_input['role']='scientist'
             self._control(scientist.meta.program,control_input,effect)
         finally:adapter.close(session)
@@ -165,7 +180,7 @@ class CodingResearchRuntime:
         old=Claim(programs[0],'one submitted Python version; algorithm space remains open')
         new=Claim(programs[selected],'one submitted Python version; algorithm space remains open')
         score=adapter.evaluate(new,task,task.split)
-        payload={'task':public,'old_code':old.program.source,'new_code':new.program.source,'public_feedback':plain(observations)}
+        payload={'task_id':task.task_id,'old_artifact_hash':old.program.content_hash,'task':public,'old_code':old.program.source,'new_code':new.program.source,'public_feedback':plain(observations)}
         products=list(programs)+[
             artifact('experiment','apps-public-experiment-v1',canonical({'actions':plain([o.action for o in observations])})),
             artifact('result','apps-public-result-v1',canonical({'observations':plain(observations)})),
@@ -175,6 +190,9 @@ class CodingResearchRuntime:
                    {'kind':'control-trace','programs':[scientist.meta.program.content_hash,challenger.meta.program.content_hash],'trace':trace})
         evidence=EvidenceBundle(prov,task,tuple(observations),old,new,score,(),digest((new.program.source,observations)),Usage(),agent_payload=payload,execution_records=execution)
         if not adapter.audit(evidence):raise ProtocolError('coding independent audit failed')
+        from ..benchmarks.apps.challenges import solution_boundary
+        boundaries,certificates=solution_boundary(adapter,evidence)
+        evidence=replace(evidence,boundaries=boundaries,boundary_certificates=certificates)
         after=adapter.meter();usage=Usage(*(getattr(after,n)-getattr(before,n) for n in before.__dataclass_fields__))
         tokens=sum(r['completion']['input_tokens']+r['completion']['output_tokens'] for r in records)
         return replace(evidence,usage=usage+Usage(model_tokens=tokens))
@@ -186,11 +204,75 @@ class CodingResearchRuntime:
             return result
         finally:self._tape=None
     def propose(self,context,challenger,scientist,training,generation):
-        # Restricted new-input proposals are wired to independent certification in C3.
-        return None
+        if self.method in ('direct','self-repair') or getattr(self,'mode','full')=='fixed':return None
+        views=[e.agent_view() for e in training]
+        if not views:return None
+        records=[]
+        prompt=canonical({'contract':'Return JSON object {parent_task_id, old_artifact_hash, input}. Invent one new legal distinguishing INPUT for a listed train problem. Do not supply an answer. Certification is independent.',
+            'instructions':challenger.representation,'scientist':scientist.representation,'train_evidence':views})
+        text=self._call(challenger,prompt,records,max_calls=1)
+        data=json.loads(text)
+        if not isinstance(data,dict) or set(data)!={'parent_task_id','old_artifact_hash','input'}:raise ProtocolError('restricted challenge proposal schema')
+        artifact=ResearchArtifact('world','apps-challenge-v1',str(generation+1),canonical(data),
+            Schema.of({'type':'object'}),Schema.of({'type':'object'}),provenance('challenger',generation,challenger.content_hash))
+        self.events.append({'type':'challenge-generation','artifact':artifact,'model_records':records})
+        return ChallengeProposal('apps',artifact,'A')
+    def _workflow_behavior(self,artifact,role,view):
+        # A control-only witness with the same recorded PUBLIC feedback in both
+        # arms. This is a semantic-difference filter, never a score or invention.
+        trace=[];versions=[];public=view['task'];plans=[]
+        def effect(name,args):
+            trace.append((name,args))
+            if len(trace)>self.limits.effects:raise ProtocolError('control behavior effect bound')
+            if name=='code_generate':
+                if len(args)!=1 or type(args[0]) is not bool:raise ProtocolError('generation arity')
+                if len(versions)>=self.limits.model_calls:raise ProtocolError('control behavior model bound')
+                versions.append(view['old_code']);return len(versions)-1
+            if name=='code_experiment':
+                if len(args)!=1:raise ProtocolError('experiment arity')
+                indexes=args[0]
+                if indexes is not None and (not isinstance(indexes,list) or len(set(indexes))!=len(indexes) or any(type(i) is not int or not 0<=i<len(public['public_cases']) for i in indexes)):raise ProtocolError('legal public experiment scope')
+                return {'indexes':indexes}
+            if name in ('code_test','code_submit'):
+                if len(args)!=1 or type(args[0]) is not int or not 0<=args[0]<len(versions):raise ProtocolError('version reference')
+                return view['public_feedback'][0]['outcome'] if name=='code_test' and view['public_feedback'] else {'submitted':'recorded-version'}
+            if name=='failure_analysis':return {'public_feedback':view['public_feedback'],'versions':['recorded-version']*len(versions)}
+            raise ProtocolError('ungranted coding effect')
+        self._control(artifact,{'role':role,'task':public,'budget':plain(self.limits),
+            'scientist_code':view['old_code'],'public_indexes':list(range(len(public['public_cases'])))},effect)
+        return plain(trace)
     def candidates(self,parent,diagnosis,training,context,limit,mode):
         if any(e.task.split!='train' for e in training):raise PermissionError('train-only policy generation')
-        return ()
+        if self.method in ('direct','self-repair') or mode=='fixed':return ()
+        views=[e.agent_view() for e in training];records=[]
+        if not views:return ()
+        prompt=canonical({'contract':'Return JSON list of at most max_candidates objects with instructions (string) and optional control (complete research-control-v1 document). Invent executable diagnostic functions and feedback-dependent research workflows. No answer labels. Effects: code_generate(bool include_public_feedback)->version index, code_test(index)->public feedback, code_submit(index), failure_analysis(), code_experiment(public index list or null). Scientist must submit code. Challenger uses public experiment planning, or code_generate/test/submit to select a model-proposed public index plan. Shared call/effect limits are immutable.',
+            'parent':plain(parent),'role':parent.role,'train_evidence':views,'max_candidates':limit,
+            'control_language':{'tags':['const','var','let','if','fold','call','op','effect'],
+                'operations':['get','list','object','append','concat','length','add','sub','eq','lt','and','or','not']},'limits':plain(self.limits)})
+        data=json.loads(self._call(parent,prompt,records,max_calls=1))
+        if not isinstance(data,list) or len(data)>limit:raise ProtocolError('coding policy candidate count')
+        attempts=[]
+        for item in data:
+            try:
+                if not isinstance(item,dict) or not set(item)<= {'instructions','control'} or type(item.get('instructions')) is not str or not 1<=len(item['instructions'])<=8192:raise ProtocolError('coding candidate schema')
+                meta=parent.meta;witnesses=[]
+                if 'control' in item and mode!='no_meta' and self.method=='evolved-meta-rsi':
+                    program=control_artifact(item['control'],provenance(parent.role,parent.generation+1,parent.content_hash),str(parent.meta.revision+2))
+                    for view in views:
+                        old=self._workflow_behavior(parent.meta.program,parent.role,view)
+                        new=self._workflow_behavior(program,parent.role,view)
+                        if old!=new:witnesses.append({'public_task':digest(view['task']),'old':old,'new':new})
+                    if not witnesses:raise ProtocolError('meta change has no behavioral witness')
+                    meta=replace(meta,program=program,revision=meta.revision+1)
+                child=replace(parent,meta=meta,representation=(item['instructions'],),generation=parent.generation+1,parent_hash=parent.content_hash,
+                    knowledge=parent.knowledge+tuple(digest(e.agent_view()) for e in training))
+                if child.representation==parent.representation and meta==parent.meta:continue
+                attempts.append((child,{'operator':'MODEL_CODING_POLICY','meta_witnesses':witnesses,'frozen_parent_model':plain(parent.model),'allocation':plain(self.limits)}))
+            except (ProtocolError,TypeError,ValueError,KeyError) as exc:
+                self.events.append({'type':'invalid-coding-candidate','reason':str(exc),'candidate_hash':digest(item)})
+        self.events.append({'type':'coding-policy-generation','role':parent.role,'model_records':records,'candidates':len(attempts)})
+        return tuple(attempts)
     def adapt(self,parent,diagnosis,context,meta):
         # Meta-only intervention. Parent task instructions/model stay exactly fixed;
         # code invention happens on the same task with the same frozen limits.

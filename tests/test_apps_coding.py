@@ -20,8 +20,9 @@ class CodingTests(unittest.TestCase):
             a,r,c,s,client=self.setup_runtime(root,['def add(a,b): return 0','def add(a,b): return a+b'])
             task=a.sample('train',0)[0];e=r.episode(a,task,s,c,0,256)
             self.assertEqual(e.score.value,1);self.assertNotEqual(e.old_claim,e.new_claim)
-            self.assertEqual(e.usage.model_tokens,24);self.assertEqual(e.usage.experiments,6)
-            self.assertFalse(e.boundaries);self.assertFalse(e.boundary_certificates)
+            self.assertEqual(e.usage.model_tokens,24);self.assertEqual(e.usage.experiments,8)
+            self.assertEqual(e.boundary_certificates[0].kind,'SOLUTION_REFUTED')
+            self.assertIn('no claim',e.boundary_certificates[0].scope)
             prompts=json.dumps(client.calls)
             for secret in ('PRIVATE_REFERENCE_SENTINEL','private_cases','"score"','[2, 3]'):
                 self.assertNotIn(secret,prompts);self.assertNotIn(secret,json.dumps(e.agent_view()))

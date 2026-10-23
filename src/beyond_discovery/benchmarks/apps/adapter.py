@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 import json
 from ...core.contracts import Usage,Observation,Score,Status,Certification,digest,plain
-from ...core.protocol import DomainCapabilities,Schema,ProtocolError,JSONValue
+from ...core.protocol import DomainCapabilities,Schema,ProtocolError,JSONValue,CapabilityUnsupported
 from .data import APPSStore
 from .judge import DockerJudge
 
@@ -17,8 +17,9 @@ class Session:
 
 class APPSAdapter:
     domain_id='apps';verifier_version='apps-independent-judge-v1'
-    def __init__(self,store,judge,episode_model_tokens=69632,task_limit=None,testing=False):
+    def __init__(self,store,judge,episode_model_tokens=69632,task_limit=None,testing=False,oracle=None):
         if not isinstance(judge,DockerJudge) and not testing: raise TypeError('production APPS requires DockerJudge, not ResearchSandbox or a fixture')
+        self.oracle=oracle
         self.store=store if isinstance(store,APPSStore) else APPSStore(store)
         self.judge=judge;self.episode_model_tokens=episode_model_tokens;self.task_limit=task_limit
         self._usage=Usage();self._sessions={};self.judge_events=[];self._generated={}
@@ -31,7 +32,7 @@ class APPSAdapter:
             limitations=('APPS is public and may occur in model pretraining','Generated tasks require an independent legality validator and verified Oracle','No host execution fallback'))
     def public_context(self):
         return {'domain_id':'apps','manifest_hash':self.store.manifest['manifest_hash'],'judge':self.judge.identity,
-                'episode_model_tokens':self.episode_model_tokens,'language':LANGUAGE,'verifier_version':self.verifier_version}
+                'oracle_identity':self.oracle.identity if self.oracle else None,'episode_model_tokens':self.episode_model_tokens,'language':LANGUAGE,'verifier_version':self.verifier_version}
     def sample(self,split,seed):
         refs=self.store.sample(split,seed)
         return refs[:self.task_limit] if self.task_limit else refs
@@ -88,8 +89,17 @@ class APPSAdapter:
                 regenerated=self.step(session,observation.action)
                 if regenerated.outcome!=observation.outcome:return False
             finally:self.close(session)
+        if evidence.boundary_certificates:
+            from .challenges import solution_boundary
+            boundaries,certificates=solution_boundary(self,evidence)
+            if boundaries!=evidence.boundaries or certificates!=evidence.boundary_certificates:return False
+        elif evidence.boundaries:return False
         return True
     def compile_challenge(self,proposal):
+        if self.oracle is not None:
+            try:return self.oracle.certify(self,proposal)
+            except CapabilityUnsupported as exc:return Certification(Status.PENDING,None,'',digest(proposal),self.verifier_version,str(exc))
+            except (ValueError,KeyError,TypeError):return Certification(Status.INVALID,None,'',digest(proposal),self.verifier_version,'malformed restricted challenge')
         return Certification(Status.PENDING,None,'',digest(proposal),self.verifier_version,'CAPABILITY_UNSUPPORTED: independent APPS Oracle/legality validator not configured')
     def conformance_actions(self):return ()
     def unseal_for_final(self):self.store.sealed=False
