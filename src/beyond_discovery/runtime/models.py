@@ -1,10 +1,12 @@
 """Real optional inference clients. No credential, download or inference fallback."""
 from dataclasses import dataclass
 import json
+import ipaddress
 import os
 from pathlib import Path
 import threading
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import urlparse
 from .llm import Completion
@@ -49,11 +51,16 @@ class HTTPModelClient:
 
     input_bound must bound the provider's ENTIRE serialized prompt, including its
     framing. It is supplied explicitly rather than guessing tokens from characters.
-    HTTPS required except loopback protocol tests. Redirects are disabled.
+    HTTPS required except loopback protocol tests. Private HTTP is available only
+    through an explicit opt-in for RFC1918 LiteLLM gateways. Redirects are disabled.
     """
-    def __init__(self, model, base_url, key_env, ledger, input_bound, proxy=None):
+    def __init__(self, model, base_url, key_env, ledger, input_bound, proxy=None, allow_private_http=False):
         url = urlparse(base_url)
-        if url.scheme != "https" and not (url.scheme == "http" and url.hostname in ("localhost", "127.0.0.1", "::1")):
+        loopback=url.scheme=="http" and url.hostname in ("localhost","127.0.0.1","::1")
+        try: address=ipaddress.ip_address(url.hostname or "")
+        except ValueError: address=None
+        private_http=(url.scheme=="http" and allow_private_http and address is not None and any(address in ipaddress.ip_network(n) for n in ("10.0.0.0/8","172.16.0.0/12","192.168.0.0/16")))
+        if url.scheme != "https" and not loopback and not private_http:
             raise ValueError("HTTPS endpoint required")
         if url.username or url.password or url.query or url.fragment: raise ValueError("endpoint credentials/query forbidden")
         if type(input_bound) is not int or input_bound < 1: raise ValueError("explicit provider prompt upper bound required")
@@ -105,6 +112,11 @@ class HTTPModelClient:
             if not isinstance(content,str): raise ProtocolError("MODEL_REFUSAL_OR_NON_TEXT")
             entry['status']='COMPLETE'
             return Completion(content,self.model,inp,out,choice['finish_reason']!='stop')
+        except urllib.error.HTTPError as exc:
+            # Preserve protocol metadata without saving an error body that
+            # could echo request data or provider details.
+            entry['status']='FAILED'; entry['error_type']='HTTPError'; entry['http_status']=exc.code
+            raise
         except Exception as exc:
             # Exception text may contain URLs/credentials supplied by a transport.
             entry['status']='FAILED'; entry['error_type']=type(exc).__name__

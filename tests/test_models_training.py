@@ -7,6 +7,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch
+from urllib.error import HTTPError
 from beyond_discovery.runtime.models import HTTPModelClient, TokenLedger, validate_checkpoint
 from beyond_discovery.runtime.model_research import strict_json, ModelResearchRuntime
 from beyond_discovery.runtime.trainer import TrainingRecord, LoRABackend, validate_records
@@ -16,6 +17,14 @@ from beyond_discovery.core.contracts import ModelState
 
 
 class ModelTrainingTests(unittest.TestCase):
+    def test_private_http_requires_explicit_rfc1918_opt_in(self):
+        ledger=TokenLedger(100)
+        with self.assertRaises(ValueError):HTTPModelClient('private','http://10.130.138.46:8010/v1','TEST_RSI_KEY',ledger,20)
+        client=HTTPModelClient('private','http://10.130.138.46:8010/v1','TEST_RSI_KEY',ledger,20,allow_private_http=True)
+        self.assertEqual(client.url,'http://10.130.138.46:8010/v1/chat/completions')
+        for url in ('http://8.8.8.8/v1','http://gateway.internal/v1'):
+            with self.assertRaises(ValueError):HTTPModelClient('private',url,'TEST_RSI_KEY',ledger,20,allow_private_http=True)
+
     def test_atomic_budget_and_ambiguous_failure_charges(self):
         ledger=TokenLedger(10)
         self.assertEqual(ledger.reserve(8),8)
@@ -43,6 +52,26 @@ class ModelTrainingTests(unittest.TestCase):
             self.assertNotIn('test-secret',json.dumps(client.calls))
             with patch.dict(os.environ,{},clear=True):
                 with self.assertRaises(CapabilityUnsupported): client('x',1)
+        finally: server.shutdown();server.server_close();thread.join()
+
+    def test_http_error_archives_status_without_body_or_secret(self):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']))
+                self.send_response(404);self.end_headers();self.wfile.write(b'{"error":"model missing"}')
+        server=HTTPServer(('127.0.0.1',0),Handler)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            ledger=TokenLedger(100)
+            client=HTTPModelClient('missing','http://127.0.0.1:'+str(server.server_port)+'/v1','TEST_RSI_KEY',ledger,20)
+            with patch.dict(os.environ,{'TEST_RSI_KEY':'test-secret'}):
+                with self.assertRaises(HTTPError):client('public prompt',10)
+            self.assertEqual(client.calls[0]['http_status'],404)
+            self.assertEqual(client.calls[0]['error_type'],'HTTPError')
+            self.assertNotIn('model missing',json.dumps(client.calls))
+            self.assertNotIn('test-secret',json.dumps(client.calls))
+            self.assertEqual(ledger.used,30)  # ambiguous provider failures retain the reservation
         finally: server.shutdown();server.server_close();thread.join()
 
     def test_checkpoint_identity_and_tamper(self):

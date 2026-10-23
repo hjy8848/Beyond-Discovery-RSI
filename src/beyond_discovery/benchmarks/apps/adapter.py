@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import json
 from ...core.contracts import Usage,Observation,Score,Status,Certification,digest,plain
 from ...core.protocol import DomainCapabilities,Schema,ProtocolError,JSONValue,CapabilityUnsupported
-from .data import APPSStore,LOCKED_ARCHIVE_SHA256,LOCKED_MANIFEST_SHA256
+from .data import APPSStore,LOCKED_ARCHIVE_SHA256,LOCKED_MANIFEST_SHA256,load_public_sidecar
 from .judge import DockerJudge
 
 LANGUAGE='python-apps-v1'
@@ -17,10 +17,11 @@ class Session:
 
 class APPSAdapter:
     domain_id='apps';verifier_version='apps-independent-judge-v1'
-    def __init__(self,store,judge,episode_model_tokens=69632,task_limit=None,testing=False,oracle=None):
+    def __init__(self,store,judge,episode_model_tokens=69632,task_limit=None,testing=False,oracle=None,public_sidecar=None):
         if not isinstance(judge,DockerJudge) and not testing: raise TypeError('production APPS requires DockerJudge, not ResearchSandbox or a fixture')
         self.oracle=oracle
         self.store=store if isinstance(store,APPSStore) else APPSStore(store)
+        self.public_sidecar=load_public_sidecar(public_sidecar,self.store) if public_sidecar else {'cases':{},'sha256':None,'selection_provenance':{}}
         if not testing and (self.store.manifest['archive_sha256']!=LOCKED_ARCHIVE_SHA256 or self.store.manifest['manifest_hash']!=LOCKED_MANIFEST_SHA256):raise CapabilityUnsupported('dataset does not match committed APPS v1 task lock')
         self.judge=judge;self.episode_model_tokens=episode_model_tokens;self.task_limit=task_limit
         self._usage=Usage();self._sessions={};self.judge_events=[];self._generated={}
@@ -32,12 +33,15 @@ class APPSAdapter:
             score_definition='official APPS strict problem accuracy: every official case must pass',
             limitations=('APPS is public and may occur in model pretraining','Generated tasks require an independent legality validator and verified Oracle','No host execution fallback'))
     def public_context(self):
-        return {'domain_id':'apps','dataset_lock':'apps-official-v1','task_limit':self.task_limit,'manifest_hash':self.store.manifest['manifest_hash'],'judge':self.judge.identity,
+        return {'domain_id':'apps','dataset_lock':'apps-official-v1','task_limit':self.task_limit,'manifest_hash':self.store.manifest['manifest_hash'],'public_sidecar_sha256':self.public_sidecar['sha256'],'judge':self.judge.identity,
                 'oracle_identity':self.oracle.identity if self.oracle else None,'episode_model_tokens':self.episode_model_tokens,'language':LANGUAGE,'verifier_version':self.verifier_version}
     def sample(self,split,seed):
         refs=self.store.sample(split,seed)
         return refs[:self.task_limit] if self.task_limit else refs
-    def _data(self,task): return self._generated[task.task_id]['data'] if task.task_id in self._generated else self.store.load(task)
+    def _data(self,task):
+        data=self._generated[task.task_id]['data'] if task.task_id in self._generated else self.store.load(task)
+        additions=self.public_sidecar['cases'].get(task.task_id,())
+        return {**data,'public_cases':[*data['public_cases'],*additions]} if additions else data
     def public_task(self,task):
         data=self._data(task)
         return {k:data[k] for k in ('question','starter','fn_name','public_cases')}

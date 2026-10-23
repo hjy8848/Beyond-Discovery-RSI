@@ -111,3 +111,46 @@ class APPSStore:
         return {'question':data['question.txt'],'starter':data.get('starter_code.py',''),'fn_name':tests.get('fn_name'),
                 'private_cases':[{'input':x,'output':y} for x,y in zip(tests['inputs'],tests['outputs'])],
                 'public_cases':json.loads(data.get('public_tests.json','[]')),'solutions':[]}
+
+
+def load_public_sidecar(path,store):
+    """Load operator-provided examples extracted from a locked question statement.
+
+    This sidecar is separate from the archive lock. Only locked, supported train
+    tasks are accepted, and each entry is bound to the exact question blob hash.
+    """
+    raw=Path(path).read_bytes()
+    if len(raw)>4*1024*1024: raise ProtocolError('APPS public sidecar exceeds size bound')
+    def reject_constant(value): raise ValueError('non-finite JSON constant')
+    try: data=json.loads(raw,parse_constant=reject_constant)
+    except (ValueError,UnicodeDecodeError): raise ProtocolError('invalid APPS public sidecar JSON')
+    if not isinstance(data,dict) or set(data)-{'format','dataset_manifest_hash','entries','selection_provenance'} or not {'format','dataset_manifest_hash','entries'}<=set(data):
+        raise ProtocolError('APPS public sidecar schema')
+    if data['format']!='apps-public-sidecar-v1' or data['dataset_manifest_hash']!=store.manifest['manifest_hash']:
+        raise ProtocolError('APPS public sidecar dataset lock mismatch')
+    if 'selection_provenance' in data and not isinstance(data['selection_provenance'],dict):
+        raise ProtocolError('APPS sidecar selection provenance schema')
+    entries=data['entries']
+    if not isinstance(entries,list) or len(entries)>1000: raise ProtocolError('APPS public sidecar entry bound')
+    cases_by_task={}
+    for entry in entries:
+        required={'task_id','archive_key','question_sha256','source','cases'}
+        if not isinstance(entry,dict) or set(entry)!=required: raise ProtocolError('APPS public sidecar entry schema')
+        item=store.refs.get(entry['task_id'])
+        if item is None or item[1]!=entry['archive_key'] or item[0].split!='train':
+            raise ProtocolError('APPS public sidecar must target a locked train task')
+        row=item[2]
+        if row.get('execution_support')!='SUPPORTED': raise CapabilityUnsupported('APPS sidecar task is unsupported')
+        if entry['source']!='official-question-example' or entry['question_sha256']!=row.get('files',{}).get('question.txt'):
+            raise ProtocolError('APPS sidecar source/question hash mismatch')
+        cases=entry['cases']
+        if not isinstance(cases,list) or not 1<=len(cases)<=100 or entry['task_id'] in cases_by_task:
+            raise ProtocolError('APPS public sidecar case bound/duplicate task')
+        for case in cases:
+            if not isinstance(case,dict) or set(case)!={'input','output'}:
+                raise ProtocolError('APPS public sidecar case schema')
+            if len(json.dumps(case,ensure_ascii=False,allow_nan=False).encode())>1000000:
+                raise ProtocolError('APPS public sidecar case size')
+        cases_by_task[entry['task_id']]=cases
+    return {'cases':cases_by_task,'sha256':hashlib.sha256(raw).hexdigest(),
+            'selection_provenance':data.get('selection_provenance',{})}

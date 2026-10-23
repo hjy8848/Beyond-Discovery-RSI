@@ -11,6 +11,40 @@ from beyond_discovery.core.protocol import Action,CapabilityUnsupported,Protocol
 
 
 class APPSAdapterTests(unittest.TestCase):
+    def test_statement_sidecar_is_lock_bound_and_only_public_projection_reaches_agents(self):
+        with tempfile.TemporaryDirectory() as root:
+            store=fixture_store(root);task=next(t for t in store.sample('train',0) if store.refs[t.task_id][2]['public_case_count']>0)
+            ref,key,row=store.refs[task.task_id]
+            sidecar={'format':'apps-public-sidecar-v1','dataset_manifest_hash':store.manifest['manifest_hash'],
+                'selection_provenance':{'kind':'test-fixture'},'entries':[{'task_id':task.task_id,'archive_key':key,
+                    'question_sha256':row['files']['question.txt'],'source':'official-question-example',
+                    'cases':[{'input':[3,4],'output':7}]}]}
+            path=Path(root)/'public.json';path.write_text(json.dumps(sidecar))
+            judge=ProtocolJudge();adapter=APPSAdapter(store,judge,testing=True,public_sidecar=path)
+            public=adapter.public_task(task)
+            self.assertEqual(len(public['public_cases']),2)
+            self.assertEqual(public['public_cases'][-1],{'input':[3,4],'output':7})
+            self.assertNotIn('private_cases',public);self.assertNotIn('solutions',public)
+            self.assertEqual(adapter.public_context()['public_sidecar_sha256'],hashlib.sha256(path.read_bytes()).hexdigest())
+            session=adapter.begin(task,1)
+            observation=adapter.step(session,Action.create('public_test',{'code':'def add(a,b): return a+b','indexes':[1]}))
+            self.assertEqual(observation.outcome.value['verdicts'],[True])
+            self.assertEqual(judge.records[-1]['result'].cases,1)
+            adapter.close(session)
+
+    def test_statement_sidecar_rejects_wrong_question_and_dev_or_test_tasks(self):
+        with tempfile.TemporaryDirectory() as root:
+            store=fixture_store(root);task=store.sample('train',0)[0];ref,key,row=store.refs[task.task_id]
+            entry={'task_id':task.task_id,'archive_key':key,'question_sha256':'0'*64,
+                'source':'official-question-example','cases':[{'input':[1,2],'output':3}]}
+            path=Path(root)/'public.json'
+            path.write_text(json.dumps({'format':'apps-public-sidecar-v1','dataset_manifest_hash':store.manifest['manifest_hash'],'entries':[entry]}))
+            with self.assertRaises(ProtocolError):APPSAdapter(store,ProtocolJudge(),testing=True,public_sidecar=path)
+            test_ref,test_key,test_row=next(item for item in store.refs.values() if item[0].split=='test')
+            entry.update(task_id=test_ref.task_id,archive_key=test_key,question_sha256=test_row['files']['question.txt'])
+            path.write_text(json.dumps({'format':'apps-public-sidecar-v1','dataset_manifest_hash':store.manifest['manifest_hash'],'entries':[entry]}))
+            with self.assertRaises(ProtocolError):APPSAdapter(store,ProtocolJudge(),testing=True,public_sidecar=path)
+
     def test_pinned_official_semantics_golden_cases(self):
         self.assertEqual(hashlib.sha256(VENDOR.read_bytes()).hexdigest(),VENDOR_SHA256)
         for output,expected,answer in [([' 3 '],'3',True),(['1.000001'],'1',True),(['1.1'],'1',False),(['2','1'],'1\n2',True),(['wrong'],'3',False)]:
