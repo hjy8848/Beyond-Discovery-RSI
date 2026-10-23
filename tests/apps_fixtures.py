@@ -30,3 +30,16 @@ class ProtocolJudge:
         outputs=tuple(sum(c['input']) if correct else -999 for c in cases)
         result=JudgeResult(tuple(x==c['output'] for x,c in zip(outputs,cases)),'COMPLETE',len(cases),1,0.,outputs)
         self.records.append({'code':code,'result':result});return result
+
+class ScriptedModel:
+    """Explicit protocol fixture. Never a production model or training result."""
+    model='TEST_MODEL_FIXTURE'
+    def __init__(self,texts,ledger=None,input_bound=256):
+        from beyond_discovery.runtime.models import TokenLedger
+        self.texts=iter(texts);self.ledger=ledger or TokenLedger(1000000);self.calls=[];self.input_bound=input_bound
+    def __call__(self,prompt,max_tokens):
+        from beyond_discovery.runtime.llm import Completion
+        reserved=self.ledger.reserve(self.input_bound+max_tokens)
+        text=next(self.texts);self.ledger.settle(reserved,12)
+        self.calls.append({'request':prompt,'response':text,'status':'EXPLICIT_FIXTURE'})
+        return Completion(text,self.model,8,4)
