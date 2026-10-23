@@ -26,7 +26,7 @@ class CodingLimits:
         if not 1<=self.model_calls<=8 or not 128<=self.input_tokens<=100000 or not 32<=self.output_tokens<=16384 or not 1<=self.effects<=64:
             raise ValueError('coding episode limits')
     @property
-    def tokens(self):return self.model_calls*(self.input_tokens+self.output_tokens)
+    def tokens(self):return 2*self.model_calls*(self.input_tokens+self.output_tokens)
 
 
 def provenance(role='scientist',generation=0,parent=None):
@@ -69,6 +69,9 @@ class CodingResearchRuntime:
         if method not in ('direct','self-repair','fixed-meta-rsi','evolved-meta-rsi'):raise ValueError('coding method')
         if not testing and any(not isinstance(c,(HTTPModelClient,LocalHFClient)) for c in self.clients.values()):
             raise TypeError('production coding runtime requires real HTTP/HF clients')
+        self.model_identities={role:client.model for role,client in self.clients.items()}
+        for client in self.clients.values():
+            if isinstance(client,HTTPModelClient):client.require_model_identity=True
         self.events=[];self.model_events=[];self._tape=None;self._tape_index=0
     @property
     def total_model_tokens(self):
@@ -80,8 +83,9 @@ class CodingResearchRuntime:
         if not self.replay_only and set(self.clients)!={'scientist','challenger'}:raise CapabilityUnsupported('both real role clients required')
     def context(self,adapter):
         if adapter.episode_model_tokens!=self.limits.tokens:raise ProtocolError('adapter/runtime episode token reservation mismatch')
-        return {**adapter.public_context(),'coding_limits':plain(self.limits),'method':self.method}
+        return {**adapter.public_context(),'coding_limits':plain(self.limits),'model_identities':self.model_identities,'method':self.method}
     def initial_pair(self,config):
+        if self.model_identities and (set(self.model_identities)!={'scientist','challenger'} or any(name!=config.base_model for name in self.model_identities.values())):raise ProtocolError('both role clients must match the preregistered shared base model')
         result=[]
         for role in ('challenger','scientist'):
             workflow=seed_workflow(role,'direct' if self.method=='direct' else 'self-repair',provenance(role),self.limits.model_calls)
@@ -180,9 +184,10 @@ class CodingResearchRuntime:
         old=Claim(programs[0],'one submitted Python version; algorithm space remains open')
         new=Claim(programs[selected],'one submitted Python version; algorithm space remains open')
         score=adapter.evaluate(new,task,task.split)
-        payload={'task_id':task.task_id,'old_artifact_hash':old.program.content_hash,'task':public,'old_code':old.program.source,'new_code':new.program.source,'public_feedback':plain(observations)}
+        payload={'task_id':task.task_id,'old_artifact_hash':new.program.content_hash,'task':public,'old_code':old.program.source,'new_code':new.program.source,'public_feedback':plain(observations)}
         products=list(programs)+[
             artifact('experiment','apps-public-experiment-v1',canonical({'actions':plain([o.action for o in observations])})),
+            artifact('experiment','apps-public-plan-v1',canonical(plans)),
             artifact('result','apps-public-result-v1',canonical({'observations':plain(observations)})),
             artifact('experiment','model-invocation-v1',canonical(records))]
         execution=({'kind':'model-generations','records':records},
@@ -240,7 +245,17 @@ class CodingResearchRuntime:
             raise ProtocolError('ungranted coding effect')
         self._control(artifact,{'role':role,'task':public,'budget':plain(self.limits),
             'scientist_code':view['old_code'],'public_indexes':list(range(len(public['public_cases'])))},effect)
-        return plain(trace)
+        meaningful=[];generated=0;submitted=None;experiment=list(range(len(public['public_cases'])))
+        for name,args in trace:
+            if name=='failure_analysis':continue
+            if name=='code_submit':submitted=args;continue
+            if name=='code_experiment':
+                experiment=args[0] if args[0] is not None else list(range(len(public['public_cases'])))
+                continue
+            if name=='code_generate':
+                meaningful.append((name,args if generated else [False]));generated+=1
+            else:meaningful.append((name,args))
+        return plain({'effects':meaningful,'submitted':submitted,'public_experiment':experiment})
     def candidates(self,parent,diagnosis,training,context,limit,mode):
         if any(e.task.split!='train' for e in training):raise PermissionError('train-only policy generation')
         if self.method in ('direct','self-repair') or mode=='fixed':return ()

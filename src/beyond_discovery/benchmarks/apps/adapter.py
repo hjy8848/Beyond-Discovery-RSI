@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import json
 from ...core.contracts import Usage,Observation,Score,Status,Certification,digest,plain
 from ...core.protocol import DomainCapabilities,Schema,ProtocolError,JSONValue,CapabilityUnsupported
-from .data import APPSStore
+from .data import APPSStore,LOCKED_ARCHIVE_SHA256,LOCKED_MANIFEST_SHA256
 from .judge import DockerJudge
 
 LANGUAGE='python-apps-v1'
@@ -21,9 +21,10 @@ class APPSAdapter:
         if not isinstance(judge,DockerJudge) and not testing: raise TypeError('production APPS requires DockerJudge, not ResearchSandbox or a fixture')
         self.oracle=oracle
         self.store=store if isinstance(store,APPSStore) else APPSStore(store)
+        if not testing and (self.store.manifest['archive_sha256']!=LOCKED_ARCHIVE_SHA256 or self.store.manifest['manifest_hash']!=LOCKED_MANIFEST_SHA256):raise CapabilityUnsupported('dataset does not match committed APPS v1 task lock')
         self.judge=judge;self.episode_model_tokens=episode_model_tokens;self.task_limit=task_limit
         self._usage=Usage();self._sessions={};self.judge_events=[];self._generated={}
-        self._submissions={};self.frozen_scientist=None
+        self._submissions={};self.frozen_scientist=None;self._final_authorized=None
     def describe(self):
         action=Schema.of({'type':'object','properties':{'operation':{'type':'string','enum':['public_test']},'arguments':{'type':'object','properties':{'code':{'type':'string','maxLength':65536},'indexes':{'type':'array','items':{'type':'integer','minimum':0}}},'required':['code'],'additionalProperties':False}},'required':['operation','arguments'],'additionalProperties':False})
         return DomainCapabilities('apps',action,Schema.of({'type':'object'}),Schema.of({'type':'object'}),(LANGUAGE,),('A',),8,
@@ -31,7 +32,7 @@ class APPSAdapter:
             score_definition='official APPS strict problem accuracy: every official case must pass',
             limitations=('APPS is public and may occur in model pretraining','Generated tasks require an independent legality validator and verified Oracle','No host execution fallback'))
     def public_context(self):
-        return {'domain_id':'apps','manifest_hash':self.store.manifest['manifest_hash'],'judge':self.judge.identity,
+        return {'domain_id':'apps','dataset_lock':'apps-official-v1','task_limit':self.task_limit,'manifest_hash':self.store.manifest['manifest_hash'],'judge':self.judge.identity,
                 'oracle_identity':self.oracle.identity if self.oracle else None,'episode_model_tokens':self.episode_model_tokens,'language':LANGUAGE,'verifier_version':self.verifier_version}
     def sample(self,split,seed):
         refs=self.store.sample(split,seed)
@@ -54,7 +55,11 @@ class APPSAdapter:
     def close(self,session):self._sessions.pop(id(session),None)
     def initial_observation(self,session):self._session(session);return JSONValue.of(self.public_task(session.task))
     def _judge(self,code,cases,fn_name,label):
-        result=self.judge.grade(code,cases,fn_name)
+        try:result=self.judge.grade(code,cases,fn_name)
+        except Exception as exc:
+            self._usage=self._usage+Usage(experiments=getattr(exc,'judge_launches',0),verification_outputs=getattr(exc,'judge_cases',0))
+            self.judge_events.append({'label':label,'code_hash':digest(code),'cases_hash':digest(cases),'judge':self.judge.identity,'error_type':type(exc).__name__,'launches':getattr(exc,'judge_launches',0),'cases':getattr(exc,'judge_cases',0)})
+            raise
         self._usage=self._usage+Usage(experiments=result.launches,verification_outputs=result.cases)
         self.judge_events.append({'label':label,'code_hash':digest(code),'cases_hash':digest(cases),'judge':self.judge.identity,'result':result})
         return result
@@ -76,11 +81,17 @@ class APPSAdapter:
         data=self._data(task);program=claim.program
         if program.language!=LANGUAGE or program.provenance.domain_id!='apps':raise ProtocolError('APPS expects a Python ResearchArtifact')
         result=self._judge(program.source,data['private_cases'],data['fn_name'],'private-official')
+        if result.status in ('OUTPUT_LIMIT','INPUT_LIMIT','RETURN_PROTOCOL_ERROR'):raise CapabilityUnsupported('Judge wire capability limit: '+result.status)
         if task.split=='train':self._submissions[(task.task_id,program.content_hash)]=program
         return Score(float(result.accepted),True,result.cases,result.status if result.status!='COMPLETE' else ('AC' if result.accepted else 'WA'))
     def audit(self,evidence):
         if evidence.provenance.domain_id!='apps' or evidence.provenance.split!=evidence.task.split:return False
-        if evidence.failure:return not evidence.score.valid
+        if evidence.failure:return False
+        if evidence.behavior_hash!=digest((evidence.new_claim.program.source,evidence.observations)):return False
+        expected_public={'task_id':evidence.task.task_id,'old_artifact_hash':evidence.new_claim.program.content_hash,
+            'task':self.public_task(evidence.task),'old_code':evidence.old_claim.program.source,
+            'new_code':evidence.new_claim.program.source,'public_feedback':plain(evidence.observations)}
+        if evidence.agent_payload!=expected_public:return False
         if self.evaluate(evidence.new_claim,evidence.task,evidence.task.split)!=evidence.score:return False
         for i,observation in enumerate(evidence.observations):
             if observation.sequence!=i+1:return False
@@ -102,5 +113,10 @@ class APPSAdapter:
             except (ValueError,KeyError,TypeError):return Certification(Status.INVALID,None,'',digest(proposal),self.verifier_version,'malformed restricted challenge')
         return Certification(Status.PENDING,None,'',digest(proposal),self.verifier_version,'CAPABILITY_UNSUPPORTED: independent APPS Oracle/legality validator not configured')
     def conformance_actions(self):return ()
-    def unseal_for_final(self):self.store.sealed=False
+    def authorize_final(self,frozen_hash):
+        if type(frozen_hash) is not str or len(frozen_hash)!=64:raise PermissionError('frozen evaluation identity required')
+        self._final_authorized=frozen_hash
+    def unseal_for_final(self):
+        if self._final_authorized is None:raise PermissionError('official APPS test access requires a frozen final authorization')
+        self.store.sealed=False
     def bind_frozen_scientist(self,content_hash):self.frozen_scientist=content_hash

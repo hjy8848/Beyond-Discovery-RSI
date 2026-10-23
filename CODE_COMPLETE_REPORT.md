@@ -175,3 +175,28 @@ Replay 核对实现哈希，实际重执行确定性认证/交互；不请求模
 8. 科学错误由独立评分反映，资源未知/非法代码/截断/世界非法分别记录；不存在通用自然科学真值判定器。
 
 **H1–H4：全部未验证。** 本次交付的程序通过工程测试不等于研究主张成立。
+
+## C: APPS 编程 Benchmark 接入
+
+C1–C4 在 `apps-c1-c4` 上以四个独立提交增量实现。Core Design Spec、Decision Lock、24 项锁定原则、独立 Gate 与 Archive 的实现均未修改。
+
+| 阶段 | 代码与行为 | 证据及限制 |
+|---|---|---|
+| C1 | `benchmarks/apps/data.py`、`adapter.py`、`judge.py`、隔离 `container/worker.py`：APPS 固定数据/评测版本、完整 train/dev/test 清单、隐藏测试封存、stdin 与 call-based、只在 OCI 运行提交代码 | 从真实 Berkeley APPS 归档导入并校验 SHA。锁定 5,000 个官方 train 和 5,000 个官方 test 目录；train/dev 按题目内容聚类切分为 4,042/958。551 项输入缺失、官方测试对不齐或超过预设文件边界的任务记录为 CAPABILITY_UNSUPPORTED。judge container 缺失导致真实容器运行未验证 |
+| C2 | `runtime/coding.py`：独立实现 ResearchRuntime；真实 HTTP/HF 客户端生成完整 Python；安全控制 DSL 支持公开测试反馈；旧/新代码、控制流、实验、模型请求/响应、用量和结果形成有来源记录。回放消费生成磁带并重新调用 Judge | 编写源代码静态/比较测试及协议 fixture；无模型凭据和已审镜像，真实 APPS 模型推理、代码执行和官方 judge 对照未验证 |
+| C3 | `benchmarks/apps/challenges.py`：单个 Python 版本的公开反例证书；限制新输入创建必须经过人工审核的合法输入验证器、2–4 份相互独立参考实现的一致结果，并复现旧程序失败。模型可发明控制 DSL 函数及反馈工作流 | 单次 WA 只证伪被测程序；不会生成有限假设空间被证伪证书。没有 Oracle 时状态是 PENDING。测试的 Oracle 是明确标注 fixture，不构成真实数据认证 |
+| C4 | Controller smoke、四种同上限对照、失败成本归档、离线回放、冻结后一次性正式测试 CLI、APPS 一致性检查及官方语义 parity 工具 | 本环境缺少模型凭据、Judge OCI 镜像和 container engine；没有实际模型 Token、真实 Python Judge 输出、正式 test 分数或成本。协议端到端用 fixture 验证，不冒充 APPS 成绩 |
+
+官方 APPS 归档锁：`6ef8e98ecca10b0159df0da4b524ecc1ca782a3b9473c57fc547ebccbbc2d0ca`；清单 hash：`cbc0ebbdd1d6fb262d88c6d45cdd46b8f8c5ac1a7daa0869531a9382ee191328`，逐题 task ID/分区/来源聚类/文件哈希存于 `src/beyond_discovery/benchmarks/apps/tasks-v1.jsonl`。清单没有发布问题正文、测试样本或参考答案。APPS 是公开 Benchmark，模型可能见过其问题。
+
+分阶段 APPS 报告：`reports/APPS_C1.md`–`reports/APPS_C4.md`。真实模型、Judge 容器、安全边界和官方语义的未验证项按阶段写明。`benchmarks/apps/cli.py` 的 `smoke` 与 `suite` 不解除 test 封存；`final` 要求在同一次命令验证所有传入的冻结策略、实现、数据、模型和 Judge 标识之后，只执行一次最终评分。
+
+## APPS 最终验证记录
+
+本开发环境实际导入了完整官方压缩包，运行任务清单与数据版本锁校验。直接能力检查返回：
+
+`CAPABILITY_UNSUPPORTED: reviewed digest-pinned APPS_JUDGE_IMAGE not provisioned`
+
+没有进行真实模型调用。两个需要 reviewed `APPS_JUDGE_IMAGE` 的可选 OCI 测试因镜像/容器引擎不存在而跳过，不能据此声称真实判题语义相等或容器安全。
+
+全量测试结果、Python/macOS 环境和验证命令追加在同目录 `reports/validation/APPS_C4-full.txt` 与 `reports/validation/APPS-capabilities.json`。其中的 fixture 成功仅证明工程流程和协议工作，不代表真实模型、APPS 性能、无污染泛化或研究增益。H1–H4 依然未验证。

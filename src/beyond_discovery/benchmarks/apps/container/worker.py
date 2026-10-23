@@ -1,6 +1,8 @@
 """Runs ONLY inside an isolated OCI container. No labels/references are supplied."""
+import types
 import ast, contextlib, io, json, sys, os, platform, faulthandler, signal
 from unittest.mock import patch,mock_open
+import numpy as np
 sys.path.insert(0,'/opt/apps')
 from wire import encode,decode
 
@@ -20,26 +22,34 @@ def reply(value):
 def main():
     init=json.loads(protocol_in.readline(1048577))
     reliability_guard()
-    namespace={}
+    namespace=types.ModuleType('tmp_sol','').__dict__
+    def timeout_handler(*args):raise TimeoutError('APPS time limit')
+    signal.signal(signal.SIGALRM,timeout_handler)
     try:
+        signal.alarm(init['timeout'])
         with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
             exec(init['prepared_source'],namespace)
             obj=namespace['Solution']() if init['solution_class'] else None
             method=getattr(obj,init['fn_name']) if obj is not None else namespace[init['fn_name'] or 'code']
+        signal.alarm(0)
         reply({'status':'READY'})
     except BaseException:
-        reply({'status':'CE'}); return
+        signal.alarm(0);reply({'status':'CE'}); return
     for line in protocol_in:
         try:
             inputs=decode(json.loads(line)['input'])
-            capture=io.StringIO()
+            capture=io.StringIO();capture.close=lambda *args:None
+            signal.alarm(init['timeout'])
             with contextlib.redirect_stdout(capture),contextlib.redirect_stderr(io.StringIO()):
                 value=method(*inputs) if init['fn_name'] else call_method(method,inputs)
+            signal.alarm(0)
             output=value if init['fn_name'] else capture.getvalue().splitlines()
             try: encoded=encode(output)
-            except (TypeError,ValueError): reply({'status':'RETURN_TYPE_UNSUPPORTED'});continue
+            except (TypeError,ValueError) as exc:
+                status='EVALUATOR_TYPE_UNSUPPORTED' if 'ndarray' in str(exc) else 'RETURN_TYPE_UNSUPPORTED'
+                reply({'status':status});continue
             reply({'status':'OK','output':encoded})
-        except (TypeError,ValueError): reply({'status':'RE'})
-        except BaseException: reply({'status':'RE'})
+        except (TypeError,ValueError): signal.alarm(0);reply({'status':'RE'})
+        except BaseException: signal.alarm(0);reply({'status':'RE'})
 
 if __name__=='__main__': main()

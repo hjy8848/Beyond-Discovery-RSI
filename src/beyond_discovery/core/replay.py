@@ -1,9 +1,11 @@
 """Reexecute deterministic interactions, not just compare archive hashes."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 from .archive import read_verified
 from .contracts import (ExperimentProgram, MetaPolicy, ModelState, Snapshot, ChallengeProposal,
-                        plain)
+                        plain, digest)
 from .interaction import episode
 from .protocol import CapabilityUnsupported, artifact_from, negotiate
 from ..runtime.research import resolve_runtime
@@ -43,9 +45,15 @@ def _replay(path, adapter):
         raise ValueError("implementation changed; use the archived implementation version")
     if prereg["capabilities"]["domain_id"] != adapter.domain_id:
         raise ValueError("replay domain mismatch")
-    if not adapter.describe().deterministic:
+    if not adapter.describe().deterministic and "archived-inference-replay" not in adapter.describe().features:
         raise CapabilityUnsupported("exact reexecution requires a deterministic adapter; stochastic audit-only replay is not implemented in M1")
     runtime = resolve_runtime(adapter, prereg.get("runtime_id"))
+    if prereg.get('runtime_id')=='apps-coding-v1':
+        from ..runtime.coding import CodingLimits
+        runtime.limits=CodingLimits(**prereg['runtime_context']['coding_limits'])
+        runtime.method=prereg['runtime_context']['method']
+        runtime.model_identities=prereg['runtime_context']['model_identities']
+        if runtime.context(adapter)!=prereg['runtime_context']:raise ValueError('replay model/judge/data configuration changed')
     negotiated = negotiate(adapter.describe(), runtime.languages, prereg["config"]["action_budget"],
                            prereg["config"].get("required_world_tracks", ()))
     if plain(negotiated) != prereg.get("negotiated_protocol"):
@@ -67,7 +75,8 @@ def _replay(path, adapter):
                 raise ValueError("world certification replay mismatch")
         elif kind == "freeze":
             frozen = True
-            adapter.unseal_for_final()
+            if adapter.domain_id=="apps":adapter.authorize_final(digest(data))
+            if prereg["config"].get("final_evaluation",True):adapter.unseal_for_final()
         elif kind == "episode":
             item = data["evidence"]
             task = TaskRef(**item["task"])
@@ -75,9 +84,16 @@ def _replay(path, adapter):
                 if not frozen or task.task_id in final_seen or data["label"] != "sealed-final-test":
                     raise ValueError("invalid/repeated test access")
                 final_seen.add(task.task_id)
-            regenerated = episode(adapter, task, snapshot_from(data["scientist"]),
-                                  snapshot_from(data["challenger"]), item["provenance"]["generation"],
-                                  prereg["config"]["search_budget"], runtime=runtime)
+            scientist=snapshot_from(data["scientist"]);challenger=snapshot_from(data["challenger"])
+            if "frozen-challenge-binding" in adapter.describe().features and data['label']=='train':adapter.bind_frozen_scientist(scientist.content_hash)
+            if hasattr(runtime,'replay_episode'):
+                from .protocol import usage_within,ProtocolError
+                regenerated=runtime.replay_episode(item,adapter,task,scientist,challenger,item['provenance']['generation'],prereg['config']['search_budget'])
+                allocation=adapter.estimate_episode(min(scientist.experiment.action_budget,challenger.experiment.action_budget),prereg['config']['search_budget'])
+                if not usage_within(regenerated.usage,allocation):raise ProtocolError('replay reservation exceeded')
+                regenerated=replace(regenerated,allocation=allocation)
+            else:
+                regenerated=episode(adapter,task,scientist,challenger,item['provenance']['generation'],prereg['config']['search_budget'],runtime=runtime)
             if plain(regenerated) != item:
                 raise ValueError("deterministic evidence replay mismatch")
             count += 1

@@ -36,6 +36,13 @@ class TokenLedger:
             self.pending[reserved]-=1
             self.used -= reserved - actual
 
+    def record_overrun(self,reserved,actual):
+        """Retain reported real cost even when a provider violates its bound."""
+        if type(actual) is not int or actual<reserved:raise ProtocolError('invalid overrun')
+        with self.lock:
+            if self.pending.get(reserved,0)<1:raise ProtocolError('unknown token reservation')
+            self.pending[reserved]-=1;self.used+=actual-reserved
+
 
 class HTTPModelClient:
     """OpenAI-compatible Chat Completions with explicit input-token upper bound.
@@ -84,9 +91,15 @@ class HTTPModelClient:
                 data=json.loads(payload)
             entry['response']=data
             usage=data['usage']; inp,out=usage['prompt_tokens'],usage['completion_tokens']
-            if type(inp) is not int or type(out) is not int or inp<0 or out<0 or inp>self.input_bound or out>max_tokens:
+            if type(inp) is not int or type(out) is not int or inp<0 or out<0:
                 raise ProtocolError("MODEL_USAGE_INVALID")
+            if inp+out>reservation:
+                self.ledger.record_overrun(reservation,inp+out)
+                raise ProtocolError("MODEL_USAGE_EXCEEDED_RESERVATION")
             self.ledger.settle(reservation,inp+out)
+            if inp>self.input_bound or out>max_tokens:raise ProtocolError("MODEL_USAGE_INVALID")
+            if getattr(self,'require_model_identity',False) and data.get('model')!=self.model:
+                raise ProtocolError("MODEL_IDENTITY_CHANGED_OR_UNREPORTED")
             choice=data['choices'][0]
             content=choice['message'].get('content')
             if not isinstance(content,str): raise ProtocolError("MODEL_REFUSAL_OR_NON_TEXT")

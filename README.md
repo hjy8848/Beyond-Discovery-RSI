@@ -137,3 +137,73 @@ Archive 使用内容寻址、哈希链、私有目录、独占创建和 fsync；
 阶段审查记录在 `reports/M1.md`–`M7.md`。供应商接口参考
 [Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)，
 LoRA 装载参考 [PEFT](https://huggingface.co/docs/peft/guides/peft_model_config)。
+
+## 真实 APPS 编程评测
+
+APPS 接入有独立 CLI。仓库锁定官方 `APPS.tar.gz` 的 SHA256 和完整任务清单，正式运行还要求
+同一版本的 `manifest.json` 与数据 blob。清单包含 5,000 个官方 train 与 5,000 个官方 test
+目录；train 按题目内容哈希整组切成 train/dev（4,042/958）。官方 test 在 smoke 和所有策略
+选代期间保持封存。APPS 数据公开且可能进入预训练，不能视为无污染私有基准。
+
+从 [官方 APPS release](https://people.eecs.berkeley.edu/~hendrycks/APPS.tar.gz) 下载压缩包，
+按 `dataset-lock.json` 的 `archive_sha256` 校验并导入。清单只放入仓库中的锁定元数据文件；题目数据、
+参考答案和执行样本保留在本地目录：
+
+```sh
+curl --fail --location --output APPS.tar.gz https://people.eecs.berkeley.edu/~hendrycks/APPS.tar.gz
+PYTHONPATH=src python3 -m beyond_discovery.benchmarks.apps.cli import \
+  --archive APPS.tar.gz --sha256 6ef8e98ecca10b0159df0da4b524ecc1ca782a3b9473c57fc547ebccbbc2d0ca \
+  --out /absolute/path/apps-v1
+```
+
+容器执行目前只支持 Linux 上的受信 OCI/Docker daemon。先审查锁定版本的官方 Python 评测语义，
+按 `src/beyond_discovery/benchmarks/apps/container/Dockerfile` 构建镜像，`PYTHON_BASE` 必须是
+审查过的 Python 3.11 镜像 SHA256 digest。运行时必须把最终 Judge 镜像写成 `name@sha256:…`；
+不自动 pull、不使用宿主 Python。容器无网络、只读文件系统、非 root、丢弃 Linux capabilities、
+no-new-privileges、seccomp、PID/内存/CPU/文件大小/输出/超时上限。输出由宿主可信比较器依官方
+MIT evaluator 源码语义判定，隐藏输入和期望答案不会发送给提交代码。原始 APPS 的 5,000 个 test
+任务中，版本清单登记 551 项因官方输入数据缺失、空/不匹配测试或 64 MiB 限制为
+`CAPABILITY_UNSUPPORTED`；系统不把它们记为 WA 或 AC。
+
+真实模型模式必须提供模型精确版本 ID、两个角色的 HTTP/HF 客户端和真实凭据/本地权重。HTTP
+要求服务返回与请求版本完全匹配的模型 ID 和 token 用量。`CodingLimits` 同时限制 Scientist、
+Challenger 的调用数、输入上界、输出上界；摘要统计推理真实用量和每次 Judge 执行成本。默认使用
+同一 32,768 输入 token 上界及 2,048 输出 token 上界；较长问题或研究日志应显式提高上界和总预算。
+
+```sh
+PYTHONPATH=src python3 -m beyond_discovery.benchmarks.apps.cli check \
+  --store /absolute/path/apps-v1 --judge-image registry.example/apps-judge@sha256:<digest>
+PYTHONPATH=src python3 -m beyond_discovery.benchmarks.apps.cli smoke \
+  --store /absolute/path/apps-v1 --judge-image registry.example/apps-judge@sha256:<digest> \
+  --provider http --model <immutable-model-id> --key-env APPS_API_KEY \
+  --out runs/apps-smoke --verify-replay
+PYTHONPATH=src python3 -m beyond_discovery.benchmarks.apps.cli suite \
+  --store /absolute/path/apps-v1 --judge-image registry.example/apps-judge@sha256:<digest> \
+  --provider http --model <immutable-model-id> --key-env APPS_API_KEY --out runs/apps-suite
+```
+
+`suite` 在同一 train/dev 成员、随机种子、模型/判题上限下独立执行 Direct、Self-Repair、固定
+Meta RSI、进化 Meta RSI；每次都创建新的封存运行。实际 Token、Judge 次数、有效反例、算法行为变化、
+任务 Gate、Meta Gate 和回滚写入 hash-chain archive。相同的是预算上限，实际模型生成长度与工具调用
+次数可以不同，报告不会填充成本。
+
+正式测试需先完成整套策略的 smoke 和冻结，并显式传入每个 frozen run：
+
+```sh
+PYTHONPATH=src python3 -m beyond_discovery.benchmarks.apps.cli final \
+  --store /absolute/path/apps-v1 --judge-image registry.example/apps-judge@sha256:<digest> \
+  --provider http --model <immutable-model-id> --key-env APPS_API_KEY \
+  --frozen-run runs/apps-suite/direct --frozen-run runs/apps-suite/self-repair \
+  --frozen-run runs/apps-suite/fixed-meta-rsi --frozen-run runs/apps-suite/evolved-meta-rsi \
+  --out runs/apps-final
+```
+
+Final 命令在读取任何 test blob 前验证所有来源策略、实现哈希、数据/Judge/模型版本、冻结状态和一次性
+final 标记，然后只运行冻结策略。不支持重试。同样的 model/Judge 真实路径依赖外部凭据和 Linux 镜像。
+本仓库的 APPS 流程、数据清单与协议测试已实际运行；当前环境没有 APPS Judge 镜像或模型凭据，真实
+APPS 模型训练/推理、隔离容器执行、官方运行时 parity 和实际成本都未运行。协议测试使用明确标注的
+fixture，不代表 Benchmark 成绩或模型成功。
+
+经独立 review 的 Oracle 配置只能来自 operator 私有文件，传入 `--oracle` 才会开放受限新输入认证。
+Oracle 缺失则 Challenger 任务为 PENDING/CAPABILITY_UNSUPPORTED，不计分。APPS 公开问题也可能有
+预训练污染；烟测和公开 split 上的结果不能证明无污染泛化或 H1–H4 科学假设。

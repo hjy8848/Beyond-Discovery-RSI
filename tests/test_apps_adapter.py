@@ -1,7 +1,8 @@
-import ast,hashlib,json,shutil,tempfile,unittest
+import ast,hashlib,json,shutil,tempfile,unittest,tarfile,io
 from pathlib import Path
 from unittest.mock import patch
 from apps_fixtures import fixture_store,ProtocolJudge
+from beyond_discovery.benchmarks.apps.data import APPSStore
 from beyond_discovery.benchmarks.apps.adapter import APPSAdapter
 from beyond_discovery.benchmarks.apps.judge import DockerJudge,ContainerFailure
 from beyond_discovery.benchmarks.apps.semantics import compare,prepare,official,VENDOR,VENDOR_SHA256
@@ -65,3 +66,23 @@ class APPSAdapterTests(unittest.TestCase):
             self.assertFalse(result.accepted);self.assertEqual(result.status,reason)
             self.assertEqual(result.launches,1);self.assertEqual(result.cases,1)
         with self.assertRaises(ProtocolError):judge.grade('x'*65537,[{'input':'','output':''}])
+    def test_official_v1_task_lock_and_private_payload_hash_list(self):
+        from pathlib import Path
+        lockpath=Path(__file__).parents[1]/'src/beyond_discovery/benchmarks/apps/dataset-lock.json'
+        lock=json.loads(lockpath.read_text());tasklist=lockpath.with_name(lock['task_list'])
+        self.assertEqual(hashlib.sha256(tasklist.read_bytes()).hexdigest(),lock['task_list_sha256'])
+        rows=[json.loads(line) for line in tasklist.read_text().splitlines()]
+        self.assertEqual(len(rows),lock['official_train_tasks']+lock['official_test_tasks'])
+        self.assertEqual(sum(x['split']=='test' for x in rows),lock['official_test_tasks'])
+        self.assertGreater(lock['unsupported_tasks'],0)
+        self.assertNotIn('PRIVATE_REFERENCE_SENTINEL',tasklist.read_text())
+        self.assertNotIn('"inputs"',tasklist.read_text())
+    def test_official_task_with_unusable_test_manifest_stays_unsupported(self):
+        with tempfile.TemporaryDirectory() as root:
+            archive=Path(root)/'apps.tar';out=Path(root)/'store'
+            with tarfile.open(archive,'w') as tar:
+                for name,value in [('question.txt','task'),('input_output.json','{"inputs":[],"outputs":[]}')]:
+                    raw=value.encode();info=tarfile.TarInfo('APPS/train/0/'+name);info.size=len(raw);tar.addfile(info,io.BytesIO(raw))
+            sha=hashlib.sha256(archive.read_bytes()).hexdigest();from beyond_discovery.benchmarks.apps.data import import_archive
+            import_archive(archive,out,sha);store=APPSStore(out)
+            with self.assertRaises(CapabilityUnsupported):store.load(store.sample('train',1)[0])

@@ -34,7 +34,7 @@ class DockerSession:
         self.pending=b''
         try:
             response=self.exchange({'prepared_source':semantics.prepare(self.source,self.fn_name),'fn_name':self.fn_name,
-                                    'solution_class':bool(self.fn_name and 'class Solution' in self.source)},self.judge.startup_timeout)
+                                    'timeout':self.judge.case_timeout,'solution_class':bool(self.fn_name and 'class Solution' in self.source)},self.judge.startup_timeout)
             self.ready=response['status'];return self
         except Exception: self.close();raise
     def exchange(self,message,timeout):
@@ -51,7 +51,7 @@ class DockerSession:
                     line,self.pending=data.split(b'\n',1)
                     try: response=json.loads(line)
                     except (ValueError,RecursionError): raise ContainerFailure('PROTOCOL_ERROR')
-                    if not isinstance(response,dict) or response.get('status') not in ('READY','OK','CE','RE','OUTPUT_LIMIT','RETURN_TYPE_UNSUPPORTED'):
+                    if not isinstance(response,dict) or response.get('status') not in ('READY','OK','CE','RE','OUTPUT_LIMIT','RETURN_TYPE_UNSUPPORTED','EVALUATOR_TYPE_UNSUPPORTED'):
                         raise ContainerFailure('PROTOCOL_ERROR')
                     return response
                 remaining=deadline-time.monotonic()
@@ -95,7 +95,7 @@ class DockerJudge:
     def preflight(self):
         try:
             info=subprocess.run([self.engine,'info','--format','{{json .SecurityOptions}}'],capture_output=True,timeout=15,check=True)
-            if 'seccomp' not in info.stdout.decode().lower(): raise CapabilityUnsupported('container daemon has no seccomp support')
+            if 'seccomp' not in info.stdout.decode().lower() or 'unconfined' in info.stdout.decode().lower(): raise CapabilityUnsupported('container daemon has no seccomp support')
             subprocess.run([self.engine,'image','inspect',self.image],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15,check=True)
         except (OSError,subprocess.SubprocessError): raise CapabilityUnsupported('container daemon/image unavailable; no host execution fallback')
     def command(self,name,cases):
@@ -107,6 +107,7 @@ class DockerJudge:
                 '--log-driver=none','--env','PYTHONHASHSEED=0','--env','OMP_NUM_THREADS=1','-i',self.image]
     def grade(self,code,cases,fn_name=None):
         if type(code) is not str or len(code.encode())>65536 or not cases or len(cases)>10000: raise ProtocolError('APPS code/case size bound')
+        if any(len(json.dumps(encode(case['input'])).encode())>1000000 for case in cases):raise CapabilityUnsupported('APPS case exceeds Judge input wire bound')
         start=time.monotonic(); verdicts=[];outputs=[];executed=0;status='COMPLETE'
         try:
             with DockerSession(self,code,fn_name,len(cases)) as session:
@@ -116,6 +117,7 @@ class DockerJudge:
                         inputs,expected=semantics.normalize_call(case['input'],case['output']) if fn_name else (case['input'],case['output'])
                         executed+=1
                         response=session.exchange({'input':encode(inputs)},self.case_timeout)
+                        if response['status']=='EVALUATOR_TYPE_UNSUPPORTED':raise CapabilityUnsupported('official APPS comparator cannot safely accept this ndarray result')
                         if response['status']=='RETURN_TYPE_UNSUPPORTED':raise CapabilityUnsupported('APPS call return is not representable as safe JSON/tuple data')
                         if response['status']!='OK': verdicts.append(-1);outputs.append(None);status=response['status'];continue
                         try: output=decode(response['output'])
@@ -123,6 +125,10 @@ class DockerJudge:
                         outputs.append(output);verdicts.append(semantics.compare(output,expected,fn_name))
         except ContainerFailure as exc:
             status=str(exc);verdicts.append(-1)
+        except Exception as exc:
+            exc.judge_launches=1;exc.judge_cases=executed
+            self.records.append({'code_hash':digest(code),'case_hash':digest(cases),'status':'FAILED','error_type':type(exc).__name__,'launches':1,'cases':executed})
+            raise
         result=JudgeResult(tuple(verdicts),status,executed,1,time.monotonic()-start,tuple(outputs))
         self.records.append({'code_hash':digest(code),'case_hash':digest(cases),'fn_name':fn_name,'result':result,'judge':self.identity})
         return result

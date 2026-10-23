@@ -1,0 +1,11 @@
+{
+  "python": "3.9.6",
+  "platform": "macOS-15.6-arm64-arm-64bit",
+  "docker": false,
+  "podman": false,
+  "model_credentials_present": false,
+  "judge_image_present": false,
+  "official_archive_sha256": "6ef8e98ecca10b0159df0da4b524ecc1ca782a3b9473c57fc547ebccbbc2d0ca",
+  "judge_capability": "CAPABILITY_UNSUPPORTED: reviewed digest-pinned APPS_JUDGE_IMAGE not provisioned",
+  "real_model_smoke": "NOT_RUN"
+}

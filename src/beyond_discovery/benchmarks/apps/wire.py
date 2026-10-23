@@ -1,5 +1,9 @@
 """Data-only call return encoding; no pickle or executable deserialization."""
 def encode(value):
+    if type(value).__module__.startswith('numpy'):
+        if type(value).__name__=='ndarray':raise TypeError('APPS official call comparison does not accept ambiguous ndarray truth values')
+        if hasattr(value,'item'):return encode(value.item())
+        raise TypeError('unsupported NumPy return')
     if value is None or type(value) in (bool,int,float,str): return value
     if type(value) is list: return [encode(x) for x in value]
     if type(value) is tuple: return {'$tuple':[encode(x) for x in value]}
@@ -10,6 +14,8 @@ def encode(value):
 
 
 def decode(value,depth=0):
+    import math
+    if type(value) is float and not math.isfinite(value):raise ValueError("nonfinite return data")
     if depth>32: raise ValueError('return nesting limit')
     if value is None or type(value) in (bool,int,float,str): return value
     if isinstance(value,list): return [decode(x,depth+1) for x in value]

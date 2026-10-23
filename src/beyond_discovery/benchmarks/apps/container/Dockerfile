@@ -8,3 +8,4 @@ COPY wire.py /opt/apps/wire.py
 COPY container/worker.py /opt/apps/worker.py
 USER 65534:65534
 ENTRYPOINT ["python", "-I", "/opt/apps/worker.py"]
+COPY container/parity_worker.py /opt/apps/parity_worker.py

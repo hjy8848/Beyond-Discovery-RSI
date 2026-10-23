@@ -2,10 +2,12 @@
 from pathlib import Path,PurePosixPath
 import hashlib,json,re,tarfile
 from ...core.contracts import canonical,digest,TaskRef
-from ...core.protocol import ProtocolError
+from ...core.protocol import ProtocolError,CapabilityUnsupported
 from .semantics import REVISION,VENDOR_SHA256
 
 SOURCE_URL='https://people.eecs.berkeley.edu/~hendrycks/APPS.tar.gz'
+LOCKED_ARCHIVE_SHA256='6ef8e98ecca10b0159df0da4b524ecc1ca782a3b9473c57fc547ebccbbc2d0ca'
+LOCKED_MANIFEST_SHA256='cbc0ebbdd1d6fb262d88c6d45cdd46b8f8c5ac1a7daa0869531a9382ee191328'
 FILES={'question.txt','input_output.json','solutions.json','starter_code.py','public_tests.json'}
 
 
@@ -28,24 +30,35 @@ def import_archive(archive,out,expected_sha256):
             if not member.isfile() or len(parts)<3 or parts[-1] not in FILES: continue
             split,number,name=parts[-3:]
             if split not in ('train','test') or not number.isdigit(): continue
-            if member.size>67108864: raise ProtocolError('APPS member resource limit')
+            if member.size>134217728: raise ProtocolError('APPS member resource limit')
             total+=member.size
             if total>4294967296: raise ProtocolError('APPS archive resource limit')
-            content=source.extractfile(member).read();sha=hashlib.sha256(content).hexdigest()
-            path=out/'blobs'/sha
-            if not path.exists():
-                with path.open('xb') as f:f.write(content)
-                path.chmod(0o600)
+            staging=out/'blobs'/'.importing';hasher=hashlib.sha256()
+            with source.extractfile(member) as original,staging.open('xb') as destination:
+                for chunk in iter(lambda:original.read(1048576),b''):
+                    destination.write(chunk);hasher.update(chunk)
+            sha=hasher.hexdigest();path=out/'blobs'/sha
+            if path.exists():staging.unlink()
+            else:staging.rename(path);path.chmod(0o600)
             row=tasks.setdefault(split+'/'+number,{'official_split':split,'files':{}})
             if name in row['files']: raise ProtocolError('duplicate APPS task file')
             row['files'][name]=sha
     if not tasks: raise ProtocolError('archive contains no APPS tasks')
     def blob(sha):return (out/'blobs'/sha).read_text()
     for key,row in tasks.items():
-        if not {'question.txt','input_output.json'}<=set(row['files']): raise ProtocolError('incomplete APPS task')
+        if not {'question.txt','input_output.json'}<=set(row['files']):
+            row['fn_name']=None;row['case_count']=0;row['public_case_count']=0
+            row['cluster']=digest(('unsupported missing APPS files',key))
+            row['split']='test' if row['official_split']=='test' else ('dev' if int(row['cluster'],16)%5==0 else 'train')
+            row['execution_support']='CAPABILITY_UNSUPPORTED: official task is missing question or input/output data'
+            continue
         tests=json.loads(blob(row['files']['input_output.json']))
-        if not tests.get('inputs') or len(tests['inputs'])!=len(tests.get('outputs',[])): raise ProtocolError('invalid official APPS test pairs')
-        row['fn_name']=tests.get('fn_name');row['case_count']=len(tests['inputs'])
+        valid_pairs=isinstance(tests,dict) and isinstance(tests.get('inputs'),list) and isinstance(tests.get('outputs'),list) and bool(tests['inputs']) and len(tests['inputs'])==len(tests['outputs'])
+        row['fn_name']=tests.get('fn_name') if isinstance(tests,dict) else None
+        row['case_count']=len(tests.get('inputs',[])) if isinstance(tests,dict) else 0
+        row['execution_support']=('CAPABILITY_UNSUPPORTED: official task has empty/mismatched test pairs' if not valid_pairs else
+            ('CAPABILITY_UNSUPPORTED: task JSON exceeds 64 MiB runtime bound' if (out/'blobs'/row['files']['input_output.json']).stat().st_size>67108864 else
+            ('CAPABILITY_UNSUPPORTED: more than 10000 cases' if row['case_count']>10000 else 'SUPPORTED')))
         question=blob(row['files']['question.txt'])
         row['cluster']=digest(' '.join(question.split()))
         row['split']='test' if row['official_split']=='test' else ('dev' if int(row['cluster'],16)%5==0 else 'train')
@@ -85,8 +98,11 @@ class APPSStore:
         item=self.refs.get(task.task_id)
         if item is None or item[0]!=task:raise PermissionError('forged APPS task')
         if task.split=='test' and self.sealed:raise PermissionError('official test data sealed')
-        self.loaded.append(item[1]);row=item[2];data={}
+        row=item[2]
+        if row.get('execution_support','SUPPORTED')!='SUPPORTED':raise CapabilityUnsupported(row['execution_support'])
+        self.loaded.append(item[1]);data={}
         for name,sha in row['files'].items():
+            if name=='solutions.json':continue  # references are never needed for inference or candidate generation
             if not re.fullmatch('[0-9a-f]{64}',sha):raise ProtocolError('invalid blob identifier')
             content=(self.root/'blobs'/sha).read_bytes()
             if hashlib.sha256(content).hexdigest()!=sha:raise ProtocolError('APPS task blob corruption')
@@ -94,4 +110,4 @@ class APPSStore:
         tests=json.loads(data['input_output.json'])
         return {'question':data['question.txt'],'starter':data.get('starter_code.py',''),'fn_name':tests.get('fn_name'),
                 'private_cases':[{'input':x,'output':y} for x,y in zip(tests['inputs'],tests['outputs'])],
-                'public_cases':json.loads(data.get('public_tests.json','[]')),'solutions':json.loads(data.get('solutions.json','[]'))}
+                'public_cases':json.loads(data.get('public_tests.json','[]')),'solutions':[]}

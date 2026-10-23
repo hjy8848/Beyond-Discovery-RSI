@@ -179,9 +179,11 @@ class ArtifactResearchRuntime:
 def resolve_runtime(adapter, runtime_id=None):
     from .finite_research import FiniteResearchRuntime
     from .synthesis import SynthesisRuntime
-    available = (FiniteResearchRuntime, ArtifactResearchRuntime, SynthesisRuntime)
+    from .coding import CodingResearchRuntime
+    available = (FiniteResearchRuntime, ArtifactResearchRuntime, SynthesisRuntime,CodingResearchRuntime)
     caps = adapter.describe()
     for cls in available:
         if (runtime_id is None or cls.runtime_id == runtime_id) and set(cls.languages) & set(caps.artifact_languages):
+            if cls is CodingResearchRuntime:return cls(replay_only=True)
             return cls(adapter.public_context()) if cls is SynthesisRuntime else cls()
     raise CapabilityUnsupported("no registered research runtime for domain artifact languages")

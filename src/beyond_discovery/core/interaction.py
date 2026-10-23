@@ -19,12 +19,14 @@ def episode(adapter, task, scientist_snapshot, challenger_snapshot, generation, 
     return replace(evidence, allocation=reserved)
 
 
-def evaluate_pair(adapter, tasks, scientist, challenger, generation, search_budget, archive, label, runtime=None):
-    evidence = tuple(episode(adapter, t, scientist, challenger, generation, search_budget, runtime=runtime) for t in tasks)
-    for item in evidence:
-        archive.append("episode", {"label": label, "scientist": scientist,
-                                   "challenger": challenger, "evidence": item})
-    return evidence
+def evaluate_pair(adapter, tasks, scientist, challenger, generation, search_budget, archive, label, runtime=None,on_evidence=None):
+    evidence=[]
+    for task in tasks:
+        item=episode(adapter,task,scientist,challenger,generation,search_budget,runtime=runtime)
+        archive.append("episode",{"label":label,"scientist":scientist,"challenger":challenger,"evidence":item})
+        if on_evidence:on_evidence(item)
+        evidence.append(item)
+    return tuple(evidence)
 
 
 def rows(evidence, role):
