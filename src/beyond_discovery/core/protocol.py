@@ -263,7 +263,11 @@ def artifact_from(data):
 def usage_within(actual, reserved):
     for name in actual.__dataclass_fields__:
         value, limit = getattr(actual, name), getattr(reserved, name)
-        if type(value) is not int or type(limit) is not int or value < 0 or limit < 0 or value > limit:
+        if type(value) is not int or value < 0:
+            return False
+        if limit is None:
+            continue
+        if type(limit) is not int or limit < 0 or value > limit:
             return False
     return True
 

@@ -28,17 +28,21 @@ class RunConfig:
     seed: int = 42
     mode: str = "full"
     base_model: str = "bounded-enumerator-v1"
-    max_model_tokens: int = 100000
+    max_model_tokens: int | None = 100000
     max_training_steps: int = 1000
     gate: GateConfig = GateConfig()
     required_world_tracks: tuple = ("A", "B")
+    final_evaluation: bool = True
 
     def validate(self):
         if not 1 <= self.generations <= 100 or not 1 <= self.candidate_limit <= 5:
             raise ValueError("generation/candidate bounds")
         if type(self.action_budget) is not int or self.action_budget < 1 or type(self.search_budget) is not int or self.search_budget < 1:
             raise ValueError("execution budget bounds")
-        if min(self.max_experiments, self.max_predictions, self.max_search, self.max_verification_outputs, self.stagnation_patience, self.max_model_tokens, self.max_training_steps) < 1:
+        bounded = (self.max_experiments, self.max_predictions, self.max_search,
+                   self.max_verification_outputs, self.stagnation_patience, self.max_training_steps)
+        if min(bounded) < 1 or (self.max_model_tokens is not None and
+                                (type(self.max_model_tokens) is not int or self.max_model_tokens < 1)):
             raise ValueError("invalid stop budget")
         if self.mode not in ("full", "fixed", "fixed_challenger", "program_evolution", "no_restructuring", "no_meta", "no_diagnosis", "no_falsification", "reflection", "random_challenger", "hardness_first"):
             raise ValueError("unsupported baseline/ablation")
@@ -72,13 +76,17 @@ def _run_rsi(adapter, out, config=None, proposer=None, runtime=None):
     config = config or RunConfig()
     config.validate()
     caps = adapter.describe()
+    if caps.domain_id == "apps" and config.final_evaluation:
+        raise ProtocolError("APPS official test access requires the frozen-policy final command")
     runtime = runtime or resolve_runtime(adapter)
     negotiated = negotiate(caps, runtime.languages, config.action_budget, config.required_world_tracks)
     runtime.validate_mode(config.mode)
-    if getattr(runtime,"total_model_tokens",0)>config.max_model_tokens:
+    if config.max_model_tokens is not None and getattr(runtime,"total_model_tokens",0)>config.max_model_tokens:
         raise ValueError("model ledger already exceeds preregistered budget")
     for client in getattr(runtime,"clients",{}).values():
-        if client.ledger.limit>config.max_model_tokens: raise ValueError("model ledger exceeds controller cap")
+        if (config.max_model_tokens is not None and client.ledger.limit is not None and
+                client.ledger.limit>config.max_model_tokens):
+            raise ValueError("model ledger exceeds controller cap")
     if getattr(runtime,"training_config",None) and runtime.training_config['max_steps']>config.max_training_steps:
         raise ValueError("training backend budget exceeds controller cap")
     challenger, scientist = runtime.initial_pair(config)
@@ -94,7 +102,7 @@ def _run_rsi(adapter, out, config=None, proposer=None, runtime=None):
     sandbox_limits=None if sandbox is None else {'memory_bytes':sandbox.memory,'memory_mode':sandbox.memory_mode,
                                                  'cpu_seconds':sandbox.cpu,'wall_seconds':sandbox.wall,'call_timeout':sandbox.timeout}
     prereg = {"sandbox_limits":sandbox_limits,"config": config, "capabilities": caps, "negotiated_protocol": negotiated,
-              "runtime_id": runtime.runtime_id, "implementation_hash": implementation_hash(),
+              "runtime_id": runtime.runtime_id, "runtime_context":public_context, "implementation_hash": implementation_hash(),
               "train": train, "dev": dev, "initial_challenger": challenger,
               "initial_scientist": scientist, "joint_fallback": "rollback-both",
               "selection_order": "first-ACCEPT-in-predeclared-candidate-order",
@@ -108,7 +116,7 @@ def _run_rsi(adapter, out, config=None, proposer=None, runtime=None):
     stale = 0
 
     runtime_cost = Usage()
-    event_offsets = {"events": 0, "model_events": 0}
+    event_offsets = {"events": 0, "model_events": 0,"judge_events":0}
 
     def flush_runtime():
         nonlocal usage, runtime_cost
@@ -119,10 +127,12 @@ def _run_rsi(adapter, out, config=None, proposer=None, runtime=None):
         usage = usage + delta
         runtime_cost = current
         for name in event_offsets:
-            events=getattr(runtime,name,())
+            events=getattr(adapter if name=="judge_events" else runtime,name,())
             for event in events[event_offsets[name]:]: archive.append("runtime_"+name,event)
             event_offsets[name]=len(events)
-        if usage.search>config.max_search or usage.model_tokens>config.max_model_tokens or usage.training_steps>config.max_training_steps:
+        if (usage.search>config.max_search or
+                (config.max_model_tokens is not None and usage.model_tokens>config.max_model_tokens) or
+                usage.training_steps>config.max_training_steps):
             raise BudgetStop("generation resource budget exhausted")
 
     def charge_prediction():
@@ -146,7 +156,7 @@ def _run_rsi(adapter, out, config=None, proposer=None, runtime=None):
     runtime.reserve_search=reserve_search
 
     def evaluate(tasks, s, c, generation, label):
-        nonlocal usage
+        nonlocal usage,runtime_cost
         if digest(adapter.describe()) != negotiated.capabilities_hash:
             raise ProtocolError("domain capabilities changed after preregistration")
         # Reserve worst-case work BEFORE touching tasks, including reproduction.
@@ -160,17 +170,35 @@ def _run_rsi(adapter, out, config=None, proposer=None, runtime=None):
             raise BudgetStop("preregistered execution budget exhausted")
         from ..runtime.expression import prediction_meter
         token=prediction_meter.set(None)
+        inclusive=getattr(runtime,"inclusive_episode_cost",False)
+        before_meter=adapter.meter(); accounted=Usage()
+        def completed(e):
+            nonlocal usage,runtime_cost,accounted
+            usage=usage+e.usage;accounted=accounted+e.usage
+            if inclusive:
+                runtime_cost=replace(runtime_cost,model_tokens=runtime_cost.model_tokens+e.usage.model_tokens)
         try:
-            evidence = evaluate_pair(adapter, tasks, s, c, generation, config.search_budget, archive, label, runtime=runtime)
-        finally: prediction_meter.reset(token)
-        for e in evidence:
-            usage = usage + e.usage
-        return evidence
+            return evaluate_pair(adapter,tasks,s,c,generation,config.search_budget,archive,label,runtime=runtime,on_evidence=completed)
+        except Exception as exc:
+            archive.append("evaluation_failure",{"label":label,"error_type":type(exc).__name__,"reason":str(exc)})
+            raise
+        finally:
+            prediction_meter.reset(token)
+            if inclusive:
+                after_meter=adapter.meter()
+                # Completed episodes were charged above. Retain real work from
+                # interrupted/failed episodes, including ambiguous API charges.
+                residual=Usage(experiments=after_meter.experiments-before_meter.experiments-accounted.experiments,
+                    verification_outputs=after_meter.verification_outputs-before_meter.verification_outputs-accounted.verification_outputs)
+                usage=usage+residual
+                flush_runtime()
+                archive.append("evaluation_cost",{"label":label,"usage":usage,"runtime_charged":runtime_cost})
 
     try:
         for generation in range(config.generations):
             # Save these parents; no assignment below can change frozen opponents.
             c_parent, s_parent = challenger, scientist
+            if "frozen-challenge-binding" in caps.features:adapter.bind_frozen_scientist(s_parent.content_hash)
             training = evaluate(train, s_parent, c_parent, generation, "train")
             runtime.mode=config.mode
             runtime.seed=config.seed
@@ -214,7 +242,7 @@ def _run_rsi(adapter, out, config=None, proposer=None, runtime=None):
                     for call in proposer.calls[before_calls:]:
                         archive.append("model_call", call)
                     usage = usage + Usage(model_tokens=proposer.total_tokens - before_tokens)
-                if usage.model_tokens > config.max_model_tokens:
+                if config.max_model_tokens is not None and usage.model_tokens > config.max_model_tokens:
                     raise BudgetStop("reported model-token budget exceeded; no candidate selected")
             if hasattr(runtime,"trained_candidates"):
                 c_attempts=generate(lambda: runtime.trained_candidates(c_parent,c_attempts,training,
@@ -327,20 +355,22 @@ def _run_rsi(adapter, out, config=None, proposer=None, runtime=None):
     archive.append("freeze", frozen)
     # Marker written BEFORE unsealing. Interrupted final evaluation cannot retry
     # in the same output directory; training/selection never uses this result.
-    archive.marker("final_started.json", {"frozen_hash": digest(frozen)})
-    adapter.unseal_for_final()
-    test = checked_sample(adapter, "test", config.seed + 2)
-    if {t.task_id for t in test} & {t.task_id for t in train + dev}:
-        raise ProtocolError("sealed test overlaps training/development tasks")
-    try:
-        final = evaluate(test, scientist, challenger, -1, "sealed-final-test")
-        final_score = mean(e.score.value for e in final)
-        final_status = "COMPLETE"
-    except BudgetStop:
-        final_score = None
-        final_status = "BUDGET_EXHAUSTED"
+    final_score=None;final_status="SMOKE_COMPLETE"
+    if config.final_evaluation:
+        archive.marker("final_started.json", {"frozen_hash": digest(frozen)})
+        adapter.unseal_for_final()
+        test = checked_sample(adapter, "test", config.seed + 2)
+        if {t.task_id for t in test} & {t.task_id for t in train + dev}:
+            raise ProtocolError("sealed test overlaps training/development tasks")
+        try:
+            final = evaluate(test, scientist, challenger, -1, "sealed-final-test")
+            final_score = mean(e.score.value for e in final)
+            final_status = "COMPLETE"
+        except BudgetStop:
+            final_score = None
+            final_status = "BUDGET_EXHAUSTED"
     summary = {"domain": adapter.domain_id, "status": final_status, "stop_reason": stop_reason,
-               "test_score": final_score, "generations": history, "usage": usage,
+               "test_score": final_score,"test_unsealed":config.final_evaluation, "generations": history, "usage": usage,
                "challenger": challenger, "scientist": scientist,
                "protocol": negotiated, "runtime_id": runtime.runtime_id,
                "limitations": list(caps.limitations) + [

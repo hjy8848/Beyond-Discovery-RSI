@@ -25,10 +25,10 @@ def _must_reject(operation, name):
     raise ProtocolError("conformance failed: " + name)
 
 
-def check_conformance(adapter, experiment=None, actions=()):
+def check_conformance(adapter, experiment=None, actions=(),runtime=None,config=None):
     checks = []
     caps = adapter.describe()
-    runtime = ArtifactResearchRuntime(experiment) if experiment is not None else resolve_runtime(adapter)
+    runtime = runtime or (ArtifactResearchRuntime(experiment) if experiment is not None else resolve_runtime(adapter))
     budget = min(8, caps.max_action_budget)
     negotiate(caps, runtime.languages, budget)
     train = adapter.sample("train", 17)
@@ -67,7 +67,7 @@ def check_conformance(adapter, experiment=None, actions=()):
             adapter.close(session)
         _must_reject(lambda: adapter.step(session, actions[0]), "closed session")
         checks += ["budget_rejection", "closed_session_rejection"]
-    c, s = runtime.initial_pair(RunConfig(action_budget=budget))
+    c, s = runtime.initial_pair(config or RunConfig(action_budget=budget))
     evidence = episode(adapter, train[0], s, c, 0, runtime=runtime)
     if not adapter.audit(evidence): raise ProtocolError("conformance failed: valid execution audit")
     try:

@@ -10,7 +10,8 @@ from ..core.protocol import ProtocolError, JSONValue
 
 LANGUAGE='research-control-v1'
 OPERATIONS={'get','list','object','append','concat','length','add','sub','eq','lt','and','or','not'}
-EFFECTS={'invent','experiment','evaluate','predict','model','emit'}
+EFFECTS={'invent','experiment','evaluate','predict','model','emit',
+         'code_generate','code_test','code_submit','failure_analysis','code_experiment'}
 
 
 def load(artifact):

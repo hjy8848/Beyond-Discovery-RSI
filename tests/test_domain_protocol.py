@@ -8,7 +8,7 @@ import unittest
 from beyond_discovery.core.contracts import Provenance, Usage, plain
 from beyond_discovery.core.protocol import (
     Action, CapabilityUnsupported, JSONValue, ProtocolError, ResearchArtifact,
-    Schema, negotiate,
+    Schema, negotiate, usage_within,
 )
 from beyond_discovery.core.conformance import check_conformance
 from beyond_discovery.core.interaction import episode
@@ -33,6 +33,10 @@ def artifact(domain="document-edit", split="train", instructions=None, kind="exp
 
 
 class DomainProtocolTests(unittest.TestCase):
+    def test_resource_accounting_supports_unbounded_model_tokens_without_skipping_validation(self):
+        self.assertTrue(usage_within(Usage(model_tokens=10**12),Usage(model_tokens=None)))
+        self.assertFalse(usage_within(Usage(model_tokens=-1),Usage(model_tokens=None)))
+
     def test_schema_checks_structure_types_unknown_fields_and_nonfinite_numbers(self):
         schema = Schema.of({"type": "object", "properties": {"x": {"type": "integer"}},
                             "required": ["x"], "additionalProperties": False})

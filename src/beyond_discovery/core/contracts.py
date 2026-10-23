@@ -149,12 +149,14 @@ class EvidenceBundle:
     failure: Optional[str] = None
     allocation: Optional[Usage] = None
     boundary_certificates: tuple = ()
+    agent_payload: Optional[dict] = None
+    execution_records: tuple = ()
 
     def agent_view(self) -> dict:
         if self.task.split != "train":
             raise PermissionError("dev/test evidence cannot enter candidate generation")
         # Score is independent evaluation feedback; no private probe labels/programs.
-        return plain(self)
+        return plain(self.agent_payload) if self.agent_payload is not None else plain(self)
 
 
 @dataclass(frozen=True)

@@ -1,10 +1,12 @@
 """Real optional inference clients. No credential, download or inference fallback."""
 from dataclasses import dataclass
 import json
+import ipaddress
 import os
 from pathlib import Path
 import threading
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import urlparse
 from .llm import Completion
@@ -15,7 +17,7 @@ from ..core.protocol import CapabilityUnsupported, ProtocolError
 class TokenLedger:
     """Reserve before network/compute; ambiguous failures consume the reservation."""
     def __init__(self, limit):
-        if type(limit) is not int or limit < 1: raise ValueError("token limit")
+        if limit is not None and (type(limit) is not int or limit < 1): raise ValueError("token limit")
         self.limit, self.used = limit, 0
         self.lock = threading.Lock()
         self.pending = {}
@@ -23,7 +25,7 @@ class TokenLedger:
     def reserve(self, amount):
         if type(amount) is not int or amount < 1: raise ValueError("token reservation")
         with self.lock:
-            if self.used + amount > self.limit: raise ProtocolError("MODEL_TOKEN_BUDGET_EXHAUSTED")
+            if self.limit is not None and self.used + amount > self.limit: raise ProtocolError("MODEL_TOKEN_BUDGET_EXHAUSTED")
             self.used += amount
             self.pending[amount]=self.pending.get(amount,0)+1
         return amount
@@ -36,17 +38,29 @@ class TokenLedger:
             self.pending[reserved]-=1
             self.used -= reserved - actual
 
+    def record_overrun(self,reserved,actual):
+        """Retain reported real cost even when a provider violates its bound."""
+        if type(actual) is not int or actual<reserved:raise ProtocolError('invalid overrun')
+        with self.lock:
+            if self.pending.get(reserved,0)<1:raise ProtocolError('unknown token reservation')
+            self.pending[reserved]-=1;self.used+=actual-reserved
+
 
 class HTTPModelClient:
     """OpenAI-compatible Chat Completions with explicit input-token upper bound.
 
     input_bound must bound the provider's ENTIRE serialized prompt, including its
     framing. It is supplied explicitly rather than guessing tokens from characters.
-    HTTPS required except loopback protocol tests. Redirects are disabled.
+    HTTPS required except loopback protocol tests. Private HTTP is available only
+    through an explicit opt-in for RFC1918 LiteLLM gateways. Redirects are disabled.
     """
-    def __init__(self, model, base_url, key_env, ledger, input_bound, proxy=None):
+    def __init__(self, model, base_url, key_env, ledger, input_bound, proxy=None, allow_private_http=False):
         url = urlparse(base_url)
-        if url.scheme != "https" and not (url.scheme == "http" and url.hostname in ("localhost", "127.0.0.1", "::1")):
+        loopback=url.scheme=="http" and url.hostname in ("localhost","127.0.0.1","::1")
+        try: address=ipaddress.ip_address(url.hostname or "")
+        except ValueError: address=None
+        private_http=(url.scheme=="http" and allow_private_http and address is not None and any(address in ipaddress.ip_network(n) for n in ("10.0.0.0/8","172.16.0.0/12","192.168.0.0/16")))
+        if url.scheme != "https" and not loopback and not private_http:
             raise ValueError("HTTPS endpoint required")
         if url.username or url.password or url.query or url.fragment: raise ValueError("endpoint credentials/query forbidden")
         if type(input_bound) is not int or input_bound < 1: raise ValueError("explicit provider prompt upper bound required")
@@ -84,14 +98,25 @@ class HTTPModelClient:
                 data=json.loads(payload)
             entry['response']=data
             usage=data['usage']; inp,out=usage['prompt_tokens'],usage['completion_tokens']
-            if type(inp) is not int or type(out) is not int or inp<0 or out<0 or inp>self.input_bound or out>max_tokens:
+            if type(inp) is not int or type(out) is not int or inp<0 or out<0:
                 raise ProtocolError("MODEL_USAGE_INVALID")
+            if inp+out>reservation:
+                self.ledger.record_overrun(reservation,inp+out)
+                raise ProtocolError("MODEL_USAGE_EXCEEDED_RESERVATION")
             self.ledger.settle(reservation,inp+out)
+            if inp>self.input_bound or out>max_tokens:raise ProtocolError("MODEL_USAGE_INVALID")
+            if getattr(self,'require_model_identity',False) and data.get('model')!=self.model:
+                raise ProtocolError("MODEL_IDENTITY_CHANGED_OR_UNREPORTED")
             choice=data['choices'][0]
             content=choice['message'].get('content')
             if not isinstance(content,str): raise ProtocolError("MODEL_REFUSAL_OR_NON_TEXT")
             entry['status']='COMPLETE'
             return Completion(content,self.model,inp,out,choice['finish_reason']!='stop')
+        except urllib.error.HTTPError as exc:
+            # Preserve protocol metadata without saving an error body that
+            # could echo request data or provider details.
+            entry['status']='FAILED'; entry['error_type']='HTTPError'; entry['http_status']=exc.code
+            raise
         except Exception as exc:
             # Exception text may contain URLs/credentials supplied by a transport.
             entry['status']='FAILED'; entry['error_type']=type(exc).__name__

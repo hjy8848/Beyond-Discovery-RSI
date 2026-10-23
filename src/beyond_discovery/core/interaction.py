@@ -19,12 +19,14 @@ def episode(adapter, task, scientist_snapshot, challenger_snapshot, generation, 
     return replace(evidence, allocation=reserved)
 
 
-def evaluate_pair(adapter, tasks, scientist, challenger, generation, search_budget, archive, label, runtime=None):
-    evidence = tuple(episode(adapter, t, scientist, challenger, generation, search_budget, runtime=runtime) for t in tasks)
-    for item in evidence:
-        archive.append("episode", {"label": label, "scientist": scientist,
-                                   "challenger": challenger, "evidence": item})
-    return evidence
+def evaluate_pair(adapter, tasks, scientist, challenger, generation, search_budget, archive, label, runtime=None,on_evidence=None):
+    evidence=[]
+    for task in tasks:
+        item=episode(adapter,task,scientist,challenger,generation,search_budget,runtime=runtime)
+        archive.append("episode",{"label":label,"scientist":scientist,"challenger":challenger,"evidence":item})
+        if on_evidence:on_evidence(item)
+        evidence.append(item)
+    return tuple(evidence)
 
 
 def rows(evidence, role):
@@ -40,7 +42,7 @@ def rows(evidence, role):
             key = (e.task.source_cluster, e.behavior_hash)
             novel = key not in seen
             seen.add(key)
-            certified = any(getattr(c.kind,"value",c.kind)=="SPACE_REFUTED" for c in e.boundary_certificates)
+            certified = any(getattr(c.kind,"value",c.kind)in ("SPACE_REFUTED","SOLUTION_REFUTED") for c in e.boundary_certificates)
             value = float(novel and certified and any(b.reproduced for b in e.boundaries)) / max(1, e.usage.experiments)
         allocated_cost = allocation_cost(e)
         result.append((e.task.source_cluster, value, e.score.valid and e.failure is None, allocated_cost, e.task.task_id))
@@ -63,7 +65,7 @@ def invention_rows(frozen, adapted, role):
             success = old.score.value < 1.0 and new.score.value == 1.0 and old.behavior_hash != new.behavior_hash
         else:
             success = (old.observations != new.observations and bool(new.boundaries)
-                       and any(getattr(c.kind,"value",c.kind)=="SPACE_REFUTED" for c in new.boundary_certificates)
+                       and any(getattr(c.kind,"value",c.kind)in ("SPACE_REFUTED","SOLUTION_REFUTED") for c in new.boundary_certificates)
                        and all(b.reproduced for b in new.boundaries)
                        and not old.boundaries)
         result.append((new.task.source_cluster, float(success), new.score.valid,
